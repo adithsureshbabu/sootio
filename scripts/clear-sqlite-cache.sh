@@ -54,7 +54,7 @@ declare -A SERVICE_LABELS=(
     ["torbox"]="TorBox torrents"
     ["debriderapp"]="DebriderApp torrents"
     ["scraper"]="Public & specialized scrapers"
-    ["httpstreaming"]="HTTP Streams (4khdhub, hdhub4u, uhdmovies, moviesdrive)"
+    ["httpstreaming"]="HTTP Streams (4khdhub, hdhub4u, uhdmovies, moviesdrive, mkvcinemas)"
     ["search"]="General search caches"
 )
 
@@ -70,7 +70,7 @@ Usage: ./scripts/clear-sqlite-cache.sh [options]
 
 Options:
   --all                  Clear every row from cache.db (overrides other options)
-  --http-streams         Remove all cached HTTP stream pages (4khdhub, hdhub4u, uhdmovies, moviesdrive)
+  --http-streams         Remove all cached HTTP stream pages (4khdhub, hdhub4u, uhdmovies, moviesdrive, mkvcinemas)
   --realdebrid           Remove cached torrents for Real-Debrid
   --alldebrid            Remove cached torrents for AllDebrid
   --premiumize           Remove cached torrents for Premiumize
