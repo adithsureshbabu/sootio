@@ -1,24 +1,5 @@
 #!/usr/bin/env node
 
-// Ensure data directory exists before other imports
-const pathModule = await import('path');
-const { fileURLToPath } = await import('url');
-const { dirname } = await import('path');
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-
-const dataDir = pathModule.join(__dirname, 'data');
-const fsModule = await import('fs');
-
-if (!fsModule.existsSync(dataDir)) {
-    console.log(`[SERVER] Creating data directory: ${dataDir}`);
-    fsModule.mkdirSync(dataDir, { recursive: true });
-    console.log(`[SERVER] Created data directory: ${dataDir}`);
-} else {
-    console.log(`[SERVER] Data directory already exists: ${dataDir}`);
-}
-
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
@@ -34,12 +15,34 @@ import * as sqliteCache from './lib/util/sqlite-cache.js';
 import * as sqliteHashCache from './lib/util/sqlite-hash-cache.js';
 import http from 'http';
 import https from 'https';
-
+import path from 'path';
+import { fileURLToPath } from 'url';
+import fs from 'fs';
 import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 import searchCoordinator from './lib/util/search-coordinator.js';
 import * as scraperPerformance from './lib/util/scraper-performance.js';
+import Newznab from './lib/newznab.js';
+import SABnzbd from './lib/sabnzbd.js';
+import crypto from 'crypto';
+import { obfuscateSensitive } from './lib/common/torrent-utils.js';
+import { getManifest } from './lib/util/manifest.js';
+import landingTemplate from './lib/util/landingTemplate.js';
+
+// Ensure data directory exists before other imports
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const dataDir = path.join(__dirname, 'data');
+
+if (!fs.existsSync(dataDir)) {
+    console.log(`[SERVER] Creating data directory: ${dataDir}`);
+    fs.mkdirSync(dataDir, { recursive: true });
+    console.log(`[SERVER] Created data directory: ${dataDir}`);
+} else {
+    console.log(`[SERVER] Data directory already exists: ${dataDir}`);
+}
 
 // Using SQLite for local caching
 console.log('[CACHE] Using SQLite for local caching');
@@ -66,14 +69,6 @@ try {
   console.warn('Compression middleware not available, using no-op middleware');
   compression = () => (req, res, next) => next(); // No-op if compression not available
 }
-import Newznab from './lib/newznab.js';
-import SABnzbd from './lib/sabnzbd.js';
-import fs from 'fs';
-import path from 'path';
-import crypto from 'crypto';
-import { obfuscateSensitive } from './lib/common/torrent-utils.js';
-import { getManifest } from './lib/util/manifest.js';
-import landingTemplate from './lib/util/landingTemplate.js';
 
 
 
