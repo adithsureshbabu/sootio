@@ -132,6 +132,9 @@ Provider-specific resolution:
 **easynews.js** - Easynews integration (72 lines)
 - `getEasynewsStreams(config, type, id)` - Fetch and format Easynews streams
 
+**http-streams.js** - HTTP streaming scrapers (4KHDHub, HDHub4u, MKVCinemas, UHDMovies, MoviesDrive) with SQLite caching
+- `getHttpStreamingStreams(config, type, id, { season, episode })` - Fetch and cache HTTP streams with resolver wrapping
+
 **usenet.js** - Usenet/Newznab integration (351 lines)
 - `getUsenetStreams(config, type, id)` - Fetch Newznab results and match with personal files
 - File server integration for personal cloud files
