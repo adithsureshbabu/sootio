@@ -1,0 +1,57 @@
+# Dependencies
+node_modules
+.pnpm-store
+.pnpm
+
+# Build artifacts
+dist
+build
+.out
+.next
+.turbo
+.cache
+
+# Logs & temp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+*.log
+tmp
+temp
+
+# VCS
+.git
+.gitignore
+
+# Docker stuff
+Dockerfile
+docker-compose.yml
+docker-compose.override.yml
+
+# IDE/editor
+.vscode
+.idea
+*.swp
+*.swo
+
+# Env / secrets (normally provided via env or compose)
+.env
+.env.local
+.env.*.local
+
+# Tests & coverage
+coverage
+*.test.js
+*.spec.js
+*.test.ts
+*.spec.ts
+
+# Misc large things (tune this to your repo)
+uploads
+data
+backup
+*.gz
+*.zip
+*.tar
+*.tar.gz
