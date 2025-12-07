@@ -1,19 +1,19 @@
-# Use an official Node.js image
-FROM node:20.18.1
+# Use an official Node.js Alpine image
+FROM node:20-alpine
 
 # Set working directory inside container
 WORKDIR /app
 
-# Install git and build tools required for dependencies
-RUN apt-get update && apt-get install -y \
+# Install git and build tools required for dependencies (Alpine uses apk, not apt)
+RUN apk add --no-cache \
     git \
     python3 \
     make \
     g++ \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
+    sqlite \
+    sqlite-dev
 
-# Copy only package.json and package-lock.json first (better build caching)
+# Copy only dependency files first (better layer caching)
 COPY package*.json ./
 COPY pnpm-lock.yaml ./
 
@@ -23,8 +23,8 @@ RUN npm install -g pnpm@9 && pnpm install --frozen-lockfile
 # Copy rest of the project files
 COPY . .
 
-# Expose app port (optional, e.g. if your app runs on 3000)
+# Expose app port (keep whatever your app actually listens on)
 EXPOSE 6907
 
-# Start the dev server (using nodemon or your dev script)
+# Start the dev / app server
 CMD ["npm", "run", "start"]

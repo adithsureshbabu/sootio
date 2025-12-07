@@ -30,6 +30,202 @@ import { obfuscateSensitive } from './lib/common/torrent-utils.js';
 import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
 
+// Bot detection and anti-scraping utilities
+const BOT_USER_AGENTS = [
+    /bot/i,
+    /crawler/i,
+    /spider/i,
+    /slurp/i,
+    /teoma/i,
+    /heritrix/i,
+    /setoozbot/i,
+    /discobot/i,
+    /purebot/i,
+    /yacybot/i,
+    /acoonbot/i,
+    /findlink/i,
+    /linkedinbot/i,
+    /embedly/i,
+    /quora link preview/i,
+    /ahrefsbot/i,
+    /siteexplorer/i,
+    /majestic12/i,
+    /oozbot/i,
+    /netcraft/i,
+    /trendiction/i,
+    /dbot/i,
+    /seznambot/i,
+    /ec2linkfinder/i,
+    /gslfbot/i,
+    /aihitbot/i,
+    /intelium_bot/i,
+    /facebookexternalhit/i,
+    /yeti/i,
+    /retrevo/i,
+    /silk/i,
+    /ltbot/i,
+    /pinterest/i,
+    /telegrambot/i,
+    /tumblr/i,
+    /redditbot/i,
+    /slackbot/i,
+    /whatsapp/i,
+    /discordbot/i,
+    /go-http-client/i,
+    /python-requests/i,
+    /axios/i,
+    /node-fetch/i,
+    /php-curl/i,
+    /java/i,
+    /okhttp/i,
+    /curl/i,
+    /wget/i
+];
+
+// Track suspicious IPs with detailed pattern analysis (in-memory for now, could be extended to Redis/DB)
+const suspiciousIPs = new Map(); // ip -> { count, firstSeen, isBlocked, requestHistory, lastRequestTime }
+const BLOCK_THRESHOLD = 20; // Increased threshold to reduce false positives (was 15)
+const UNBLOCK_AFTER = 5 * 60 * 1000; // Reduced to 5 minutes (was 10 minutes) to reduce IP blocking duration
+const REQUEST_WINDOW = 5 * 60 * 1000; // 5 minutes for pattern analysis
+const FAST_REQUEST_THRESHOLD = 1000; // 1 second - for detecting rapid requests
+
+// Bot detection middleware with pattern analysis
+function botDetectionMiddleware(req, res, next) {
+    const clientIp = requestIp.getClientIp(req);
+    const userAgent = req.get('User-Agent') || '';
+    const acceptHeader = req.get('Accept') || '';
+    const acceptEncoding = req.get('Accept-Encoding') || '';
+    const currentTime = Date.now();
+
+    let suspiciousScore = 0;
+    const reasons = [];
+
+    // Removed User-Agent bot pattern check as it was blocking too many legitimate requests
+    // Some legitimate clients have User-Agent strings that match bot patterns
+
+    // Removed missing User-Agent check as it was blocking too many legitimate requests
+    // Many browsers and clients don't always send User-Agent or send empty values
+
+    // Removed Accept header check as it was flagging legitimate browser requests
+    // Many browsers and clients send generic Accept headers on resolver endpoints
+
+    // Removed Accept-Language check as it was blocking too many legitimate requests
+    // Many browsers and clients don't always send Accept-Language header
+
+    // Make Stremio User-Agent check less strict - allow other valid clients
+    // Removed the strict check for Stremio in resolver endpoints to be less restrictive
+
+    // Request pattern analysis - made more lenient
+    let ipRecord = suspiciousIPs.get(clientIp) || {
+        count: 0,
+        firstSeen: currentTime,
+        isBlocked: false,
+        requestHistory: [],
+        lastRequestTime: currentTime
+    };
+
+    // Add current request to history
+    ipRecord.requestHistory.push({
+        time: currentTime,
+        path: req.path,
+        method: req.method
+    });
+
+    // Clean old requests from history (older than 5 minutes)
+    ipRecord.requestHistory = ipRecord.requestHistory.filter(
+        req => currentTime - req.time < REQUEST_WINDOW
+    );
+
+    // Check for high frequency requests - made more lenient
+    const recentRequests = ipRecord.requestHistory.filter(
+        r => currentTime - r.time < 10000 // last 10 seconds
+    );
+
+    if (recentRequests.length > 50) { // Increased threshold from 25 (was too restrictive)
+        suspiciousScore += 2;
+        reasons.push(`High frequency: ${recentRequests.length} requests in 10s`);
+    } else if (recentRequests.length > 30) { // Increased threshold from 15 (was too restrictive)
+        suspiciousScore += 1;
+        reasons.push(`Moderate frequency: ${recentRequests.length} requests in 10s`);
+    }
+
+    // Check for rapid successive requests - made more lenient (allow 200ms instead of 100ms)
+    const timeSinceLastRequest = currentTime - ipRecord.lastRequestTime;
+    if (timeSinceLastRequest < 20) { // Only flag if <20ms (was <50ms) - increased to be more permissive
+        suspiciousScore += 1;
+        reasons.push(`Very rapid requests: ${timeSinceLastRequest}ms interval`);
+    }
+
+    // Check for pattern of accessing many different resolver endpoints quickly - made much more lenient
+    const resolverRequests = ipRecord.requestHistory.filter(r => r.path.startsWith('/resolve/'));
+    const uniqueResolverPaths = new Set(resolverRequests.map(r => r.path)).size;
+
+    if (resolverRequests.length > 60 && uniqueResolverPaths > 30) { // Increased significantly (was 30 and 15)
+        suspiciousScore += 2;
+        reasons.push(`Multiple resolver endpoints accessed: ${uniqueResolverPaths} unique paths`);
+    }
+
+    // Check for sequential or patterned access - made much more lenient
+    if (resolverRequests.length > 20) { // Increased from 10 (was too sensitive)
+        // Only check if there's a high number of resolver requests
+        const pathPatterns = resolverRequests.map(r => r.path);
+        // Count how many paths are similar (indicating systematic scraping)
+        let similarCount = 0;
+        for (let i = 0; i < pathPatterns.length - 1; i++) {
+            if (pathPatterns[i] !== pathPatterns[i + 1]) {
+                // Check if paths are very similar (potential scraping pattern)
+                const currentPath = pathPatterns[i];
+                const nextPath = pathPatterns[i + 1];
+
+                // If the paths are in the same endpoint family but different params, it could be scraping
+                if (currentPath.split('/')[1] === nextPath.split('/')[1]) {
+                    similarCount++;
+                }
+            }
+        }
+
+        if (similarCount > 15) { // Increased from 8 (was too sensitive)
+            suspiciousScore += 1;
+            reasons.push(`Patterned access: ${similarCount} similar endpoints`);
+        }
+    }
+
+    // Add current score to IP record
+    ipRecord.count += suspiciousScore;
+    ipRecord.lastRequestTime = currentTime;
+
+    // Block if score exceeds threshold (increased to reduce false positives)
+    if (ipRecord.count >= BLOCK_THRESHOLD && !ipRecord.isBlocked) {
+        ipRecord.isBlocked = true;
+        console.log(`[BOT-DETECTION] Blocking IP ${clientIp} for suspicious activity: ${reasons.join(', ')}`);
+
+        // Set timeout to unblock after period
+        setTimeout(() => {
+            if (suspiciousIPs.has(clientIp)) {
+                suspiciousIPs.delete(clientIp);
+            }
+        }, UNBLOCK_AFTER);
+    }
+
+    // If IP is blocked, reject the request
+    if (ipRecord.isBlocked) {
+        console.log(`[BOT-DETECTION] Rejecting request from blocked IP ${clientIp}`);
+        return res.status(429).json({
+            success: false,
+            message: 'Request blocked due to suspicious activity. Please try again later.'
+        });
+    }
+
+    // Update IP record
+    suspiciousIPs.set(clientIp, ipRecord);
+
+    if (suspiciousScore > 0) {
+        console.log(`[BOT-DETECTION] Suspicious request from ${clientIp}: score=${suspiciousScore}, reasons=[${reasons.join(', ')}], UA="${userAgent}"`);
+    }
+
+    next();
+}
+
 // Ensure data directory exists before other imports
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -266,6 +462,9 @@ app.set('etag', false); // Disable etag generation for static performance
 
 app.use(cors());
 
+// Anti-bot detection middleware
+app.use(botDetectionMiddleware);
+
 // Performance: Add compression for API responses
 app.use(compression({
     level: 6, // Balanced compression level
@@ -278,13 +477,35 @@ app.use(swStats.getMiddleware({
     version: addonInterface.manifest.version,
 }));
 
-// Rate limiter middleware (unchanged)
-const rateLimiter = rateLimit({
-    windowMs: 120 * 120 * 1000,
-    limit: 1000,
+// Global rate limiter - more permissive limits
+const globalRateLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    limit: 400, // Increased from 200 to 400 requests per window
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => requestIp.getClientIp(req)
+    keyGenerator: (req) => requestIp.getClientIp(req),
+    message: {
+        success: false,
+        message: 'Too many requests from this IP, please try again later.'
+    },
+    skip: (req) => {
+        // Skip rate limiting for health checks and internal endpoints
+        const skipPaths = ['/configure', '/manifest-no-catalogs.json', '/'];
+        return skipPaths.includes(req.path);
+    }
+});
+
+// Specific rate limiter for resolve endpoints (more permissive limits)
+const resolveRateLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000, // 10 minutes
+    limit: 80, // Increased from 40 to 80 resolve requests per window
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => requestIp.getClientIp(req),
+    message: {
+        success: false,
+        message: 'Too many resolve requests from this IP, please try again later.'
+    }
 });
 
 // Tune server timeouts for high traffic and keep-alive performance
@@ -366,10 +587,10 @@ for (const sig of ["SIGINT","SIGTERM"]) {
         }, 10000).unref();
     });
 }
-app.use(rateLimiter);
+app.use(globalRateLimiter);
 
 // VVVV REVERTED: The resolver now performs a simple redirect VVVV
-app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
+app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async (req, res) => {
     const { debridProvider, debridApiKey, url } = req.params;
 
     // Validate required parameters
@@ -408,11 +629,20 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
 
         const cachedValue = await getCacheValue(cacheKey);
         if (cachedValue) {
-            finalUrl = cachedValue;
+            // Handle case where cachedValue might be an object from UHDMovies resolver
+            if (typeof cachedValue === 'object' && cachedValue.url) {
+                finalUrl = cachedValue.url;
+            } else {
+                finalUrl = cachedValue;
+            }
             console.log(`[CACHE] Using cached URL for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
         } else if (PENDING_RESOLVES.has(cacheKey)) {
             console.log(`[RESOLVER] Joining in-flight resolve for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
+            // Handle case where finalUrl might be an object from UHDMovies resolver
+            if (typeof finalUrl === 'object' && finalUrl.url) {
+                finalUrl = finalUrl.url;
+            }
         } else {
             console.log(`[RESOLVER] Cache miss. Resolving URL for ${debridProvider}`);
             const resolvePromise = streamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp, config);
@@ -448,19 +678,35 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
             finalUrl = await pendingRequest;
 
             if (finalUrl) {
+                // Handle case where finalUrl might be an object from UHDMovies resolver that has .url property
+                let cacheUrl;
+                if (typeof finalUrl === 'object' && finalUrl.url) {
+                    cacheUrl = finalUrl.url;
+                } else {
+                    cacheUrl = finalUrl;
+                }
+
                 // MEMORY LEAK FIX: Use new cache function with proper timer tracking
                 // Make cache TTL configurable for better performance tuning
                 const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '900000', 10); // 15 min default (reduced from 2 hours)
-                await setCacheWithTimer(cacheKey, finalUrl, cacheTtlMs);
+                await setCacheWithTimer(cacheKey, cacheUrl, cacheTtlMs);
             }
         }
 
         if (finalUrl) {
+            // Handle case where finalUrl might be an object (e.g., from UHDMovies resolver)
+            let redirectUrl;
+            if (typeof finalUrl === 'object' && finalUrl.url) {
+                redirectUrl = finalUrl.url;
+            } else {
+                redirectUrl = finalUrl;
+            }
+
             // Sanitize finalUrl before logging - it may contain API keys or auth tokens
-            const sanitizedUrl = obfuscateSensitive(finalUrl, debridApiKey);
+            const sanitizedUrl = obfuscateSensitive(redirectUrl, debridApiKey);
             console.log("[RESOLVER] Redirecting to final stream URL:", sanitizedUrl);
             // Issue a 302 redirect to the final URL.
-            res.redirect(302, finalUrl);
+            res.redirect(302, redirectUrl);
         } else {
             res.status(404).send('Could not resolve link');
         }
@@ -472,7 +718,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', async (req, res) => {
 
 // HTTP Streaming resolver endpoint (for 4KHDHub, UHDMovies, etc.)
 // This endpoint provides lazy resolution - decrypts URLs only when user selects a stream
-app.get('/resolve/httpstreaming/:url', async (req, res) => {
+app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
     const { url } = req.params;
     const decodedUrl = decodeURIComponent(url);
 
@@ -483,9 +729,22 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
     try {
         let finalUrl;
 
-        if (PENDING_RESOLVES.has(cacheKey)) {
+        const cachedValue = await getCacheValue(cacheKey);
+        if (cachedValue) {
+            // Handle case where cachedValue might be an object from UHDMovies resolver
+            if (typeof cachedValue === 'object' && cachedValue.url) {
+                finalUrl = cachedValue.url;
+            } else {
+                finalUrl = cachedValue;
+            }
+            console.log(`[CACHE] Using cached URL for key: httpstreaming:${cacheKeyHash.substring(0, 8)}...`);
+        } else if (PENDING_RESOLVES.has(cacheKey)) {
             console.log(`[HTTP-RESOLVER] Joining in-flight resolve for key: ${cacheKeyHash.substring(0, 8)}...`);
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
+            // Handle case where finalUrl might be an object from UHDMovies resolver
+            if (typeof finalUrl === 'object' && finalUrl.url) {
+                finalUrl = finalUrl.url;
+            }
         } else {
             console.log(`[HTTP-RESOLVER] Resolving HTTP stream URL...`);
 
@@ -532,11 +791,34 @@ app.get('/resolve/httpstreaming/:url', async (req, res) => {
             PENDING_RESOLVES.set(cacheKey, pendingRequest);
 
             finalUrl = await pendingRequest;
+
+            if (finalUrl) {
+                // Handle case where finalUrl might be an object from UHDMovies resolver that has .url property
+                let cacheUrl;
+                if (typeof finalUrl === 'object' && finalUrl.url) {
+                    cacheUrl = finalUrl.url;
+                } else {
+                    cacheUrl = finalUrl;
+                }
+
+                // Use the same TTL as the main resolver for consistency
+                const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '900000', 10); // 15 min default
+                await setCacheWithTimer(cacheKey, cacheUrl, cacheTtlMs);
+            }
         }
 
         if (finalUrl) {
-            console.log("[HTTP-RESOLVER] Redirecting to final stream URL:", finalUrl.substring(0, 100) + '...');
-            res.redirect(302, finalUrl);
+            // Handle case where finalUrl might be an object (e.g., from UHDMovies resolver)
+            let redirectUrl;
+            if (typeof finalUrl === 'object' && finalUrl.url) {
+                redirectUrl = finalUrl.url;
+            } else {
+                redirectUrl = finalUrl;
+            }
+
+            console.log("[HTTP-RESOLVER] Redirecting to final stream URL:",
+                typeof redirectUrl === 'string' ? redirectUrl.substring(0, 100) + '...' : redirectUrl);
+            res.redirect(302, redirectUrl);
         } else {
             res.status(404).send('Could not resolve HTTP stream link');
         }
