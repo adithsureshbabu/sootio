@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 
+import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
-import 'dotenv/config';
 import { overrideConsole } from './lib/util/logger.js';
 import { memoryMonitor } from './lib/util/memory-monitor.js';
 import serverless from './serverless.js';

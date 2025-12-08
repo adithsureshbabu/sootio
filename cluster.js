@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import 'dotenv/config';
 import cluster from 'cluster';
 import os from 'os';
 import { overrideConsole } from './lib/util/logger.js';
@@ -26,7 +27,9 @@ const maxWorkers = parseInt(process.env.MAX_WORKERS) || numCPUs;
 const workersToUse = Math.min(maxWorkers, numCPUs, 32); // Cap at 32 workers as a reasonable upper limit
 
 // Optimize worker configuration for better performance
-process.env.UV_THREADPOOL_SIZE = Math.max(4, Math.floor(numCPUs * 2)); // Increase thread pool for I/O
+// Increase thread pool size for more parallel I/O operations (HTTP requests, file operations)
+// Default Node.js is 4, we scale based on CPU count for better parallelism
+process.env.UV_THREADPOOL_SIZE = Math.max(16, Math.min(numCPUs * 4, 128)); // More aggressive thread pool for I/O
 
 if (cluster.isMaster) {
     console.log(`Master process ${process.pid} is running`);
