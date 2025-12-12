@@ -1743,6 +1743,7 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         let fileInfo = null;
         let attempt = 0;
         let lastProgress = -1;
+        let lastDownloadStatus = null;
 
         while (!fileInfo && (Date.now() - startTime) < maxWaitTime) {
             attempt++;
@@ -1752,6 +1753,7 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             if (nzoId && config.sabnzbdUrl && config.sabnzbdApiKey) {
                 try {
                     downloadStatus = await SABnzbd.getDownloadStatus(config.sabnzbdUrl, config.sabnzbdApiKey, nzoId);
+                    lastDownloadStatus = downloadStatus;
 
                     // Log progress changes
                     const currentProgress = downloadStatus.percentComplete || 0;
@@ -1903,7 +1905,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
         // Proxy to file server
         const fileServerUrl = config.fileServerUrl.replace(/\/$/, '');
-        const proxyUrl = `${fileServerUrl}/${fileInfo.path}`;
+        const encodedProxyPath = encodeURI(fileInfo.path).replace(/\|/g, '%7C').replace(/#/g, '%23');
+        const proxyUrl = `${fileServerUrl}/${encodedProxyPath}`;
         console.log(`[USENET-UNIVERSAL] Proxying to: ${proxyUrl}`);
 
         const axios = (await import('axios')).default;
@@ -1915,6 +1918,10 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
         if (apiKey) {
             headers['X-API-Key'] = apiKey;
+        }
+        const expectedFileSize = lastDownloadStatus?.bytesTotal ? Math.round(Number(lastDownloadStatus.bytesTotal)) : null;
+        if (expectedFileSize) {
+            headers['X-Expected-File-Size'] = expectedFileSize;
         }
 
         // Make request to file server
@@ -2300,7 +2307,8 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     );
                     if (fileInfo) {
                         // Use the full path from the file server (no cleaning needed)
-                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
+                        const encodedServerPath = encodeURI(fileInfo.path).replace(/\|/g, '%7C').replace(/#/g, '%23');
+                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${encodedServerPath}`;
                         videoFileSize = fileInfo.size; // Store the file size for tracking
                         console.log('[USENET] Found video file via API:', videoFilePath);
                         break; // Exit the waiting loop
@@ -2383,7 +2391,8 @@ app.get('/usenet/stream/:nzbUrl/:title/:type/:id', async (req, res) => {
                     );
                     if (fileInfo) {
                         // Use the full path from the file server (no cleaning needed)
-                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${fileInfo.path}`;
+                        const encodedServerPath = encodeURI(fileInfo.path).replace(/\|/g, '%7C').replace(/#/g, '%23');
+                        videoFilePath = `${fileServerUrl.replace(/\/$/, '')}/${encodedServerPath}`;
                         videoFileSize = fileInfo.size;
                         console.log('[USENET] Found video file via API (completed):', videoFilePath);
                         break; // Exit the waiting loop

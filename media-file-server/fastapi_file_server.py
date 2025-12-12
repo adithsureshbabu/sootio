@@ -21,7 +21,6 @@ import glob
 import hashlib
 import logging
 import zipfile
-import io
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -95,6 +94,10 @@ class Config:
     def SOURCE_DIR(self) -> str:
         return os.environ.get('FASTAPI_SOURCE_DIR', '')
 
+    @property
+    def EXTRACT_CACHE_DIR(self) -> str:
+        return os.environ.get('FASTAPI_EXTRACT_CACHE_DIR', os.path.join(tempfile.gettempdir(), 'usenet_extracted'))
+
     VIDEO_EXTENSIONS = ['.mp4', '.mkv', '.avi', '.mov', '.wmv', '.flv', '.webm', '.m4v', '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.m2ts']
 
 config = Config()
@@ -106,6 +109,10 @@ FILE_INDEX_CACHE = {
     'scanning': False
 }
 FILE_INDEX_LOCK = asyncio.Lock()
+
+# Archive extraction cache (on-demand extraction for archive:// paths)
+EXTRACTION_TASKS: Dict[str, asyncio.Future] = {}
+EXTRACTION_LOCK = asyncio.Lock()
 
 
 # === Archive Handling Functions ===
@@ -165,38 +172,7 @@ def list_archive_contents(archive_path: str) -> List[Dict[str, Any]]:
 
 def extract_file_from_archive(archive_path: str, file_in_archive: str, start_byte: int = 0, end_byte: Optional[int] = None) -> bytes:
     """Extract a specific file from an archive, optionally with byte range"""
-    lower = archive_path.lower()
-
-    try:
-        # Extract full file first
-        data = None
-
-        if lower.endswith('.zip'):
-            with zipfile.ZipFile(archive_path, 'r') as zf:
-                data = zf.read(file_in_archive)
-
-        elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.r\d+$', lower) or re.match(r'.*\.part\d+\.rar$', lower)):
-            with rarfile.RarFile(archive_path, 'r') as rf:
-                data = rf.read(file_in_archive)
-
-        elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
-            with py7zr.SevenZipFile(archive_path, 'r') as szf:
-                extracted = szf.read([file_in_archive])
-                if file_in_archive in extracted:
-                    data = extracted[file_in_archive].read()
-
-        if data is None:
-            raise Exception(f"Failed to extract {file_in_archive} from {archive_path}")
-
-        # Apply byte range if requested
-        if end_byte is None:
-            end_byte = len(data)
-
-        return data[start_byte:end_byte]
-
-    except Exception as e:
-        logger.error(f"Error extracting {file_in_archive} from {archive_path}: {e}")
-        raise
+    raise NotImplementedError("Legacy archive extraction is unused; see ensure_extraction_task for streaming extraction.")
 
 
 def find_archives_in_directory(directory: str) -> List[str]:
@@ -253,27 +229,136 @@ def find_file_by_name(filename: str, root_dir: str) -> Optional[str]:
     return None
 
 
+def _sanitize_internal_path(internal_file: str) -> str:
+    """Normalize an internal archive path and prevent path traversal"""
+    normalized = internal_file.replace('\\', '/').lstrip('/').strip()
+    safe_path = os.path.normpath(normalized)
+    if safe_path.startswith('..'):
+        raise ValueError("Invalid archive member path")
+    return safe_path
+
+
+def _build_extract_destination(archive_path: str, internal_file: str) -> str:
+    """Return deterministic extraction path for an archive member"""
+    digest = hashlib.sha1(f"{archive_path}|{internal_file}".encode()).hexdigest()[:16]
+    dest_root = os.path.abspath(os.path.join(config.EXTRACT_CACHE_DIR, digest))
+
+    safe_internal = _sanitize_internal_path(internal_file)
+    dest_path = os.path.abspath(os.path.join(dest_root, safe_internal))
+
+    # Ensure destination stays within cache directory
+    if os.path.commonpath([dest_path, dest_root]) != dest_root:
+        raise ValueError("Invalid archive extraction path")
+
+    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+    return dest_path
+
+
+def extract_archive_file_to_path(archive_path: str, internal_file: str, dest_path: str) -> str:
+    """Extract a single file from an archive to dest_path (stream-friendly)"""
+    logger.info(f"Extracting {internal_file} from {archive_path} -> {dest_path}")
+    lower = archive_path.lower()
+
+    try:
+        if lower.endswith('.zip'):
+            with zipfile.ZipFile(archive_path, 'r') as zf:
+                with zf.open(internal_file) as src, open(dest_path, 'wb') as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+        elif RARFILE_AVAILABLE and (lower.endswith('.rar') or re.match(r'.*\.r\d+$', lower) or re.match(r'.*\.part\d+\.rar$', lower)):
+            with rarfile.RarFile(archive_path, 'r') as rf:
+                with rf.open(internal_file) as src, open(dest_path, 'wb') as dst:
+                    shutil.copyfileobj(src, dst, length=1024 * 1024)
+
+        elif PY7ZR_AVAILABLE and (lower.endswith('.7z') or re.match(r'.*\.7z\.\d+$', lower)):
+            # Extract to destination directory while preserving any nested folders
+            dest_dir = os.path.dirname(dest_path)
+            with py7zr.SevenZipFile(archive_path, 'r') as szf:
+                szf.extract(targets=[internal_file], path=dest_dir)
+
+            extracted_path = os.path.normpath(os.path.join(dest_dir, internal_file))
+            if extracted_path != dest_path and os.path.exists(extracted_path):
+                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                shutil.move(extracted_path, dest_path)
+
+        else:
+            raise ValueError(f"Unsupported archive type for {archive_path}")
+
+        return dest_path
+
+    except Exception as e:
+        logger.error(f"Extraction failed for {internal_file} in {archive_path}: {e}")
+        raise
+
+
+async def ensure_extraction_task(archive_path: str, internal_file: str, expected_size: int) -> str:
+    """
+    Start (or reuse) a background extraction task for an archive member.
+    Returns the destination path where data will appear.
+    """
+    dest_path = _build_extract_destination(archive_path, internal_file)
+
+    # If fully extracted already, reuse cached file
+    try:
+        if expected_size and os.path.exists(dest_path) and os.path.getsize(dest_path) >= expected_size:
+            return dest_path
+    except OSError:
+        # If stat fails, fall through and re-extract
+        pass
+
+    key = f"{archive_path}|{internal_file}"
+
+    async with EXTRACTION_LOCK:
+        existing_task = EXTRACTION_TASKS.get(key)
+        if existing_task and not existing_task.done():
+            logger.debug(f"Reusing in-flight extraction for {internal_file}")
+            return dest_path
+
+        loop = asyncio.get_running_loop()
+        task = loop.run_in_executor(None, extract_archive_file_to_path, archive_path, internal_file, dest_path)
+
+        def _cleanup(fut, task_key=key):
+            try:
+                fut.result()
+            except Exception as e:
+                logger.error(f"Background extraction failed for {task_key}: {e}")
+            EXTRACTION_TASKS.pop(task_key, None)
+
+        task.add_done_callback(_cleanup)
+        EXTRACTION_TASKS[key] = task
+
+    return dest_path
+
+
 async def stream_file_range(
     file_path: str,
     start: int,
     end: int,
     chunk_size: int = 256 * 1024,
-    is_rar2fs: bool = False
+    is_rar2fs: bool = False,
+    wait_for_growth: bool = False,
+    expected_size: Optional[int] = None,
+    wait_label: str = "rar2fs"
 ) -> bytes:
-    """Stream a file range asynchronously with rar2fs support"""
+    """Stream a file range asynchronously with optional growth waiting (rar2fs/archive extraction)"""
     content_length = end - start + 1
     bytes_sent = 0
-    file_size = os.path.getsize(file_path)
+    file_size = expected_size or os.path.getsize(file_path)
 
     # For rar2fs files, determine if we should wait for data or fail fast
     # If seeking near the end of file (>90%), don't wait long
-    is_end_seek = is_rar2fs and (start / file_size > 0.9) if file_size > 0 else False
+    should_wait = wait_for_growth or is_rar2fs
+    # For growing files, never treat as end-of-file seek (we expect size to expand)
+    is_end_seek = False if wait_for_growth else (should_wait and (file_size > 0 and (start / file_size) > 0.9))
 
     # Smart retry logic:
     # - End seeks (>90%): only 3 retries (~0.5 seconds) - for player capability checks
     # - Normal seeks: 30 retries (~30 seconds) - give rar2fs time to extract
-    # - Non-rar2fs: 10 retries
-    max_eof_retries = 3 if is_end_seek else (30 if is_rar2fs else 10)
+    # - Non-waiting: 10 retries (small hiccups)
+    if wait_for_growth:
+        max_eof_retries = 1200  # allow up to ~20 minutes for slow downloads to append data
+    else:
+        max_eof_retries = 3 if is_end_seek else (30 if should_wait else 10)
     eof_retries = 0
 
     async with aiofiles.open(file_path, 'rb') as f:
@@ -293,15 +378,19 @@ async def stream_file_range(
                     logger.info(f"End seek at {pos_percent:.1f}% - returning available data ({bytes_sent} bytes)")
                     break
 
+                # If we're not supposed to wait, exit immediately
+                if not should_wait:
+                    break
+
                 # If we've sent some data already, we're making progress - keep going
                 # Otherwise, check if we should give up
                 if eof_retries >= max_eof_retries:
-                    logger.warning(f"Timeout waiting for rar2fs after {max_eof_retries} retries, sent {bytes_sent}/{content_length} bytes")
+                    logger.warning(f"Timeout waiting for {wait_label} after {max_eof_retries} retries, sent {bytes_sent}/{content_length} bytes")
                     break
 
                 eof_retries += 1
                 if eof_retries == 1:
-                    logger.info(f"Hit EOF at {bytes_sent}/{content_length} bytes ({pos_percent:.1f}%), waiting for rar2fs...")
+                    logger.info(f"Hit EOF at {bytes_sent}/{content_length} bytes ({pos_percent:.1f}%), waiting for {wait_label}...")
 
                 # Exponential backoff, max 1 second per retry
                 wait_time = min(1.0, 0.1 * (1.5 ** min(eof_retries, 10)))
@@ -762,32 +851,41 @@ async def stream_from_archive(file_path: str, range_header: Optional[str] = None
 
         content_length = end - start + 1
 
-        # Extract the file (or range) from archive
-        logger.info(f"Extracting bytes {start}-{end} ({content_length} bytes, {content_length/1024/1024:.2f} MB)")
+        # Kick off background extraction to cache and stream as data arrives
+        dest_path = await ensure_extraction_task(archive_path, internal_file, file_size)
 
-        try:
-            # Extract with range support
-            data = extract_file_from_archive(archive_path, internal_file, start, end + 1)
+        # Wait briefly for the extraction task to create the file
+        wait_start = time.time()
+        while not os.path.exists(dest_path) and (time.time() - wait_start) < 5:
+            await asyncio.sleep(0.1)
 
-            if not data:
-                logger.error("Extraction returned no data")
-                raise HTTPException(status_code=500, detail="Failed to extract file from archive")
+        if not os.path.exists(dest_path):
+            logger.error(f"Extraction did not create {dest_path}")
+            raise HTTPException(status_code=500, detail="Failed to start archive extraction")
 
-            # Create response
-            headers = {
-                "Content-Range": f"bytes {start}-{end}/{file_size}",
-                "Accept-Ranges": "bytes",
-                "Content-Length": str(len(data)),
-                "Content-Type": "application/octet-stream"
-            }
+        headers = {
+            "Content-Range": f"bytes {start}-{end}/{file_size}",
+            "Accept-Ranges": "bytes",
+            "Content-Length": str(content_length),
+            "Content-Type": "application/octet-stream"
+        }
 
-            logger.info(f"✓ Sending {len(data)} bytes from archive")
+        logger.info(f"Streaming archive member from cache: {dest_path}")
 
-            return Response(content=data, status_code=206, headers=headers, media_type="application/octet-stream")
-
-        except Exception as e:
-            logger.error(f"Error extracting file: {e}")
-            raise HTTPException(status_code=500, detail=f"Error extracting file: {str(e)}")
+        return StreamingResponse(
+            stream_file_range(
+                dest_path,
+                start,
+                end,
+                is_rar2fs=False,
+                wait_for_growth=True,
+                expected_size=file_size,
+                wait_label="archive extraction"
+            ),
+            status_code=206,
+            headers=headers,
+            media_type="application/octet-stream"
+        )
 
     except HTTPException:
         raise
@@ -830,14 +928,25 @@ async def stream_file(
     # Get file info
     file_size = os.path.getsize(full_path)
     is_rar2fs = '/mnt/rarfs' in full_path or '.rar' in full_path.lower()
+    is_growing = 'incomplete' in Path(full_path).parts
+    expected_size_header = request.headers.get('x-expected-file-size')
+    expected_size = None
+    if expected_size_header:
+        try:
+            expected_size = max(int(expected_size_header), file_size)
+        except ValueError:
+            expected_size = None
 
     logger.info(f"Streaming: {os.path.basename(full_path)} ({file_size / 1024 / 1024 / 1024:.2f} GB)")
     if is_rar2fs:
         logger.info("rar2fs mount detected - may have sparse data")
+    if is_growing:
+        logger.info("Incomplete/growing file detected - will wait for file growth during streaming")
 
     # Parse range header
     start = 0
     end = file_size - 1
+    reported_size = expected_size or file_size
 
     if range:
         logger.info(f"Range request: {range}")
@@ -850,18 +959,27 @@ async def stream_file(
             seek_percent = (start / file_size * 100) if file_size > 0 else 0
             logger.info(f"Seeking to {start} bytes ({seek_percent:.1f}% of file)")
 
+    # For growing/incomplete files, report a larger end so clients keep reading while we wait for data
+    growth_window = 512 * 1024 * 1024  # 512MB window
+    if is_growing:
+        if expected_size:
+            reported_size = max(expected_size, file_size, start + growth_window)
+        else:
+            reported_size = max(reported_size, file_size + growth_window, start + growth_window)
+        end = max(end, reported_size - 1)
+
     # Validate range
-    if start >= file_size:
+    if start >= file_size and not is_growing:
         logger.error(f"Range not satisfiable: start={start} >= file_size={file_size}")
         raise HTTPException(status_code=416, detail="Range Not Satisfiable")
 
     if end >= file_size:
-        end = file_size - 1
+        end = max(file_size - 1, start)
 
     content_length = end - start + 1
 
     headers = {
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
+        "Content-Range": f"bytes {start}-{end}/{reported_size}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(content_length),
         "Content-Type": "application/octet-stream"
@@ -871,7 +989,15 @@ async def stream_file(
 
     # Stream the file
     return StreamingResponse(
-        stream_file_range(full_path, start, end, is_rar2fs=is_rar2fs),
+        stream_file_range(
+            full_path,
+            start,
+            end,
+            is_rar2fs=is_rar2fs,
+            wait_for_growth=is_rar2fs or is_growing,
+            expected_size=reported_size if (is_rar2fs or is_growing) else file_size,
+            wait_label="growing file" if is_growing else "rar2fs"
+        ),
         status_code=206,  # Partial Content
         headers=headers,
         media_type="application/octet-stream"
@@ -890,9 +1016,11 @@ async def startup_event():
     logger.info(f"🔀 rar2fs mount: {config.RAR2FS_MOUNT}")
     logger.info(f"🔒 API authentication: {'Enabled' if config.API_KEY else 'Disabled'}")
     logger.info(f"📹 Error video cache: {config.ERROR_VIDEO_CACHE_DIR}")
+    logger.info(f"📦 Extraction cache: {config.EXTRACT_CACHE_DIR}")
 
     # Ensure error video cache directory exists
     os.makedirs(config.ERROR_VIDEO_CACHE_DIR, exist_ok=True)
+    os.makedirs(config.EXTRACT_CACHE_DIR, exist_ok=True)
 
     # Pre-generate common error videos
     await pregenerate_common_error_videos()
@@ -927,6 +1055,10 @@ async def shutdown_event():
 def mount_rar2fs(src_dir: str) -> str:
     """Mount the source directory via rar2fs"""
     mount_point = "/mnt/rarfs"
+
+    if not shutil.which("rar2fs"):
+        logger.warning("rar2fs binary not found, skipping FUSE mount. Install rar2fs for transparent archive streaming.")
+        return src_dir
 
     # Check if already mounted
     try:

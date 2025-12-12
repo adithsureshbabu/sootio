@@ -115,27 +115,40 @@ export async function findVideoFileViaAPI(fileServerUrl, releaseName, options = 
                 return {
                     name: matchedFile.name,
                     path: matchedFile.path, // Use full path with folder
-                    size: matchedFile.size
+                    size: matchedFile.size,
+                    inArchive: !!matchedFile.inArchive,
+                    isComplete: matchedFile.isComplete
                 };
             }
         }
 
-        // Return largest file
-        matchingFiles.sort((a, b) => (b.size || 0) - (a.size || 0));
-        const largestFile = matchingFiles[0];
+        // Prefer direct files when available, otherwise fall back to archive members (RAR/7z/ZIP)
+        const directFiles = matchingFiles.filter(f => !f.inArchive);
+        const archiveFiles = matchingFiles.filter(f => f.inArchive);
+        const candidatePool = directFiles.length > 0 ? directFiles : matchingFiles;
+
+        if (archiveFiles.length > 0) {
+            console.log(`[USENET] Archive-backed videos available: ${archiveFiles.length} (RAR/7z/ZIP supported by Python server)`);
+        }
+
+        candidatePool.sort((a, b) => (b.size || 0) - (a.size || 0));
+        const largestFile = candidatePool[0];
 
         if (!largestFile || !largestFile.name) {
             console.log(`[USENET] Error: largest file is invalid`);
             return null;
         }
 
-        console.log(`[USENET] Selected largest file: ${largestFile.name} (${(largestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
+        const archiveNote = largestFile.inArchive ? ' (archive member)' : '';
+        console.log(`[USENET] Selected largest file: ${largestFile.name}${archiveNote} (${(largestFile.size / 1024 / 1024 / 1024).toFixed(2)} GB)`);
 
         // Use full path with folder so rar2fs can find the extracted file
         return {
             name: largestFile.name,
             path: largestFile.path, // Use full path, not flatPath
-            size: largestFile.size
+            size: largestFile.size,
+            inArchive: !!largestFile.inArchive,
+            isComplete: largestFile.isComplete
         };
 
     } catch (error) {
