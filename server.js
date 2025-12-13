@@ -1829,8 +1829,6 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
         const streamInfo = ACTIVE_USENET_STREAMS.get(streamKey);
         streamInfo.lastAccess = Date.now();
-        streamInfo.activeConnections++;
-        console.log(`[USENET-UNIVERSAL] Active connections: ${streamInfo.activeConnections}`);
 
         // Store config for auto-clean
         if (config.fileServerUrl && config.autoCleanOldFiles) {
@@ -1838,19 +1836,28 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
         }
 
         // Track range requests for completion calculation
-        if (req.headers.range) {
-            const rangeMatch = req.headers.range.match(/bytes=(\d+)-(\d*)/);
+        const rangeHeader = req.headers.range;
+        let requestedStart = 0;
+        if (rangeHeader) {
+            const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d*)/);
             if (rangeMatch) {
-                const startByte = parseInt(rangeMatch[1]);
-                if (startByte > streamInfo.maxBytePosition) {
-                    streamInfo.maxBytePosition = startByte;
+                requestedStart = parseInt(rangeMatch[1]);
+                if (requestedStart > streamInfo.maxBytePosition) {
+                    streamInfo.maxBytePosition = requestedStart;
                 }
             }
         }
 
+        let connectionCleaned = false;
+
         // Handle connection close - CRITICAL for preventing memory leaks
         const cleanupConnection = () => {
+            if (connectionCleaned) {
+                return;
+            }
+            connectionCleaned = true;
             streamInfo.activeConnections--;
+            if (streamInfo.activeConnections < 0) streamInfo.activeConnections = 0;
             console.log(`[USENET-UNIVERSAL] Connection closed for ${streamKey}, active: ${streamInfo.activeConnections}`);
 
             // MEMORY LEAK FIX: Destroy axios response stream if it exists
@@ -1911,8 +1918,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
 
         const axios = (await import('axios')).default;
         const headers = {};
-        if (req.headers.range) {
-            headers['Range'] = req.headers.range;
+        if (rangeHeader) {
+            headers['Range'] = rangeHeader;
         }
 
         const apiKey = config.fileServerPassword || process.env.USENET_FILE_SERVER_API_KEY;
@@ -1924,13 +1931,71 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             headers['X-Expected-File-Size'] = expectedFileSize;
         }
 
-        // Make request to file server
-        axiosResponse = await axios.get(proxyUrl, {
-            headers,
-            responseType: 'stream',
-            validateStatus: (status) => status < 500,
-            timeout: 60000
-        });
+        // Probe readiness with a small range request (respecting requested start if provided)
+        try {
+            const probeStart = Math.max(0, requestedStart);
+            const probeEnd = probeStart + 1;
+            const probeHeaders = { ...headers, Range: `bytes=${probeStart}-${probeEnd}` };
+            const probeResp = await axios.get(proxyUrl, {
+                headers: probeHeaders,
+                responseType: 'stream',
+                validateStatus: (status) => status === 206 || status === 200 || status === 416 || status === 404,
+                timeout: 10000
+            });
+
+            console.log(`[USENET-UNIVERSAL] Probe status ${probeResp.status} for ${proxyUrl}`);
+
+            if (probeResp.status === 416) {
+                console.log(`[USENET-UNIVERSAL] Probe got 416 (range ${probeStart}-${probeEnd} not available yet)`);
+                return res.status(202).send('Video file not yet ready for streaming. Please retry in a moment.');
+            }
+            if (probeResp.status === 404) {
+                console.log(`[USENET-UNIVERSAL] Probe got 404 - file not found on server`);
+                return res.status(202).send('Video file not yet found on file server. Please retry shortly.');
+            }
+
+            // If 200 without range support, still allow if content-length is non-zero
+            const contentRange = probeResp.headers['content-range'];
+            const contentLength = Number(probeResp.headers['content-length'] || 0);
+            const minReadyBytes = 512 * 1024; // 0.5MB minimum before we attempt streaming
+            if (probeResp.status === 206 && contentRange) {
+                console.log(`[USENET-UNIVERSAL] Probe Content-Range: ${contentRange}`);
+            }
+            if (contentLength > 0 && contentLength < minReadyBytes && probeResp.status === 200) {
+                console.log(`[USENET-UNIVERSAL] Probe returned too few bytes (${contentLength}), waiting for growth`);
+                return res.status(202).send('Video file not yet ready for streaming. Please retry in a moment.');
+            }
+
+            // If we got 200/206, proceed with full proxy
+            try {
+                probeResp.data.destroy?.();
+            } catch (e) {
+                // ignore
+            }
+        } catch (err) {
+            console.log(`[USENET-UNIVERSAL] Probe failed: ${err.message}`);
+            return res.status(202).send('Video file not ready for streaming yet. Please retry shortly.');
+        }
+
+        // Redirect directly to file server to avoid Node proxy aborts; client will re-request ranges there
+        const directUrl = `${proxyUrl}${apiKey ? (proxyUrl.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(apiKey) : ''}`;
+        console.log(`[USENET-UNIVERSAL] Redirecting client directly to file server: ${directUrl}`);
+        return res.redirect(302, directUrl);
+
+        // Make request to file server (full stream)
+        try {
+            axiosResponse = await axios.get(proxyUrl, {
+                headers,
+                responseType: 'stream',
+                validateStatus: (status) => status < 500,
+                timeout: 60000,
+                decompress: false
+            });
+        } catch (err) {
+            console.log(`[USENET-UNIVERSAL] Stream request failed: ${err.message}`);
+            cleanupConnection();
+            return res.status(202).send('Video file not yet ready for streaming. Please retry in a moment.');
+        }
 
         // Forward response status and headers
         res.status(axiosResponse.status);
@@ -1962,6 +2027,8 @@ app.get('/usenet/universal/:releaseName/:type/:id', async (req, res) => {
             console.log(`[USENET-UNIVERSAL] Response error: ${err.message}`);
             cleanupConnection();
         });
+
+        res.on('close', cleanupConnection);
 
         // Pipe the response
         axiosResponse.data.pipe(res);
