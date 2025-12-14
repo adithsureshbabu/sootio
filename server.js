@@ -630,7 +630,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
         const cachedValue = await getCacheValue(cacheKey);
         if (cachedValue) {
             // Handle case where cachedValue might be an object from UHDMovies resolver
-            if (typeof cachedValue === 'object' && cachedValue.url) {
+            if (cachedValue && typeof cachedValue === 'object' && cachedValue.url) {
                 finalUrl = cachedValue.url;
             } else {
                 finalUrl = cachedValue;
@@ -640,7 +640,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
             console.log(`[RESOLVER] Joining in-flight resolve for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
             // Handle case where finalUrl might be an object from UHDMovies resolver
-            if (typeof finalUrl === 'object' && finalUrl.url) {
+            if (finalUrl && typeof finalUrl === 'object' && finalUrl.url) {
                 finalUrl = finalUrl.url;
             }
         } else {
@@ -696,7 +696,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
         if (finalUrl) {
             // Handle case where finalUrl might be an object (e.g., from UHDMovies resolver)
             let redirectUrl;
-            if (typeof finalUrl === 'object' && finalUrl.url) {
+            if (finalUrl && typeof finalUrl === 'object' && finalUrl.url) {
                 redirectUrl = finalUrl.url;
             } else {
                 redirectUrl = finalUrl;
@@ -795,7 +795,7 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             if (finalUrl) {
                 // Handle case where finalUrl might be an object from UHDMovies resolver that has .url property
                 let cacheUrl;
-                if (typeof finalUrl === 'object' && finalUrl.url) {
+                if (finalUrl && typeof finalUrl === 'object' && finalUrl.url) {
                     cacheUrl = finalUrl.url;
                 } else {
                     cacheUrl = finalUrl;
