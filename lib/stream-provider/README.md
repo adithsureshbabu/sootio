@@ -47,7 +47,7 @@ The refactored version is slightly smaller due to removal of duplicate comments 
 
 **timeouts.js** - Service timeout configuration
 - `SERVICE_TIMEOUT_MS` - Default debrid service timeout (150s)
-- `HTTP_STREAMING_TIMEOUT_MS` - HTTP streaming timeout (10s)
+- `HTTP_STREAMING_TIMEOUT_MS` - HTTP streaming timeout (4s)
 - `USENET_TIMEOUT_MS` - Usenet service timeout (20s)
 - `SEARCH_CACHE_VERSION` - Cache version for invalidation
 - `withTimeout(promise, timeoutMs, serviceName)` - Promise timeout wrapper
