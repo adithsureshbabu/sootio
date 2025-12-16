@@ -21,6 +21,7 @@ import fs from 'fs';
 import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
+import { encodeUrlForStreaming } from './lib/http-streams/utils/encoding.js';
 import searchCoordinator from './lib/util/search-coordinator.js';
 import * as scraperPerformance from './lib/util/scraper-performance.js';
 import Newznab from './lib/newznab.js';
@@ -705,8 +706,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
             // Sanitize finalUrl before logging - it may contain API keys or auth tokens
             const sanitizedUrl = obfuscateSensitive(redirectUrl, debridApiKey);
             console.log("[RESOLVER] Redirecting to final stream URL:", sanitizedUrl);
-            // Issue a 302 redirect to the final URL.
-            res.redirect(302, redirectUrl);
+            // Encode URL to handle spaces and special characters, then issue a 302 redirect
+            const encodedUrl = encodeUrlForStreaming(redirectUrl);
+            res.redirect(302, encodedUrl);
         } else {
             res.status(404).send('Could not resolve link');
         }
@@ -816,9 +818,11 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
                 redirectUrl = finalUrl;
             }
 
+            // Encode URL to handle spaces and special characters in filenames
+            const encodedUrl = encodeUrlForStreaming(redirectUrl);
             console.log("[HTTP-RESOLVER] Redirecting to final stream URL:",
-                typeof redirectUrl === 'string' ? redirectUrl.substring(0, 100) + '...' : redirectUrl);
-            res.redirect(302, redirectUrl);
+                typeof encodedUrl === 'string' ? encodedUrl.substring(0, 100) + '...' : encodedUrl);
+            res.redirect(302, encodedUrl);
         } else {
             res.status(404).send('Could not resolve HTTP stream link');
         }
