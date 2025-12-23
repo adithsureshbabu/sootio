@@ -1,6 +1,6 @@
 {
 	"name": "Sootio",
-	"version": "1.7.7-2",
+	"version": "1.7.7-3",
 	"description": "Stremio Addon to search downloads and torrents in debrid services",
 	"main": "server.js",
 	"scripts": {
