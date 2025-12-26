@@ -24,6 +24,7 @@ import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 import { encodeUrlForStreaming } from './lib/http-streams/utils/encoding.js';
 import searchCoordinator from './lib/util/search-coordinator.js';
 import * as scraperPerformance from './lib/util/scraper-performance.js';
+import personalFilesCache from './lib/util/personal-files-cache.js';
 import Newznab from './lib/newznab.js';
 import SABnzbd from './lib/sabnzbd.js';
 import crypto from 'crypto';
@@ -3212,6 +3213,23 @@ let server = null;
 // For standalone mode, start the server directly
 if (import.meta.url === `file://${__filename}`) {
     // Start memory monitoring before server starts
+    memoryMonitor.setThresholdHandler(() => {
+        const cacheStats = {
+            streamProvider: streamProvider.getCacheStats?.(),
+            searchCoordinator: searchCoordinator.getStats?.(),
+            personalFiles: personalFilesCache.getStats?.()
+        };
+        console.error(`[MEMORY] Cache stats snapshot: ${JSON.stringify(cacheStats)}`);
+
+        streamProvider.clearInternalCaches?.('memory-pressure');
+        searchCoordinator.clearCaches?.('memory-pressure');
+        personalFilesCache.clear?.();
+
+        if (global.gc) {
+            console.error('[MEMORY] Triggering garbage collection');
+            global.gc();
+        }
+    });
     memoryMonitor.startMonitoring();
     
     server = app.listen(PORT, HOST, () => {
