@@ -724,6 +724,11 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
 app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
     const { url } = req.params;
     const decodedUrl = decodeURIComponent(url);
+    const isUHDMoviesUrl = decodedUrl.includes('driveleech') ||
+        decodedUrl.includes('driveseed') ||
+        decodedUrl.includes('tech.unblockedgames.world') ||
+        decodedUrl.includes('tech.creativeexpressionsblog.com') ||
+        decodedUrl.includes('tech.examzculture.in');
 
     // Use hash of URL as cache key
     const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
@@ -745,7 +750,7 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             console.log(`[HTTP-RESOLVER] Joining in-flight resolve for key: ${cacheKeyHash.substring(0, 8)}...`);
             finalUrl = await PENDING_RESOLVES.get(cacheKey);
             // Handle case where finalUrl might be an object from UHDMovies resolver
-            if (typeof finalUrl === 'object' && finalUrl.url) {
+            if (finalUrl && typeof finalUrl === 'object' && finalUrl.url) {
                 finalUrl = finalUrl.url;
             }
         } else {
@@ -753,10 +758,7 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
 
             // Determine which resolver to use based on URL pattern
             let resolvePromise;
-            if (decodedUrl.includes('driveleech') || decodedUrl.includes('driveseed') ||
-                decodedUrl.includes('tech.unblockedgames.world') ||
-                decodedUrl.includes('tech.creativeexpressionsblog.com') ||
-                decodedUrl.includes('tech.examzculture.in')) {
+            if (isUHDMoviesUrl) {
                 // UHDMovies SID/driveleech URL
                 console.log(`[HTTP-RESOLVER] Detected UHDMovies URL, using UHDMovies resolver`);
                 resolvePromise = resolveUHDMoviesUrl(decodedUrl);
@@ -767,7 +769,9 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             }
 
             // Set timeout for HTTP stream resolution
-            const timeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10); // 15s default
+            const baseTimeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10);
+            const uhdTimeoutMs = parseInt(process.env.UHDMOVIES_RESOLVE_TIMEOUT || '25000', 10);
+            const timeoutMs = isUHDMoviesUrl ? Math.max(baseTimeoutMs, uhdTimeoutMs) : baseTimeoutMs;
             const timedResolve = Promise.race([
                 resolvePromise,
                 new Promise((_, reject) =>
