@@ -54,7 +54,7 @@ declare -A SERVICE_LABELS=(
     ["torbox"]="TorBox torrents"
     ["debriderapp"]="DebriderApp torrents"
     ["scraper"]="Public & specialized scrapers"
-    ["httpstreaming"]="HTTP Streams (4khdhub, hdhub4u, uhdmovies, moviesdrive, mkvcinemas)"
+    ["httpstreaming"]="HTTP Streams (4khdhub, hdhub4u, uhdmovies, moviesdrive, mkvcinemas, mallumv, cinedoze)"
     ["search"]="General search caches"
 )
 
