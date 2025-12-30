@@ -317,9 +317,13 @@ SQLITE_CACHE_TTL_DAYS=30
 # Proxy URL (supports HTTP/HTTPS/SOCKS5)
 DEBRID_HTTP_PROXY=socks5h://warp:1080
 
-# Which services to proxy
+# Which services to proxy (default proxy)
 DEBRID_PROXY_SERVICES=*:true
-# Or specific: realdebrid:true,scrapers:true
+# Or specific: realdebrid:true,scrapers:true,thepiratebay:true
+
+# Per-service proxy overrides (takes precedence over DEBRID_HTTP_PROXY)
+# Example: target a single scraper
+DEBRID_PER_SERVICE_PROXIES=thepiratebay:socks5h://warp:1080
 ```
 
 ### Usenet (Optional)
