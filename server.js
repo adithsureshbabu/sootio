@@ -242,8 +242,10 @@ if (!fs.existsSync(dataDir)) {
     console.log(`[SERVER] Data directory already exists: ${dataDir}`);
 }
 
-// Using SQLite for local caching
-console.log('[CACHE] Using SQLite for local caching');
+// Cache backend selection (sqlite default, postgres optional)
+const cacheBackend = (process.env.CACHE_BACKEND || 'sqlite').toLowerCase();
+const cacheBackendLabel = cacheBackend === 'postgres' ? 'Postgres' : 'SQLite';
+console.log(`[CACHE] Using ${cacheBackendLabel} for caching`);
 
 // Override console to respect LOG_LEVEL environment variable
 overrideConsole();
@@ -3265,16 +3267,16 @@ export { app, server, PORT, HOST };
 
 if (sqliteCache?.isEnabled()) {
     sqliteCache.initSqlite().then(() => {
-        console.log('[CACHE] SQLite cache initialized');
+        console.log(`[CACHE] ${cacheBackendLabel} cache initialized`);
     }).catch(err => {
-        console.error('[CACHE] SQLite init failed:', err?.message || err);
+        console.error(`[CACHE] ${cacheBackendLabel} init failed:`, err?.message || err);
     });
 }
 
 if (sqliteHashCache?.isEnabled()) {
     sqliteHashCache.initCleanup().then(() => {
-        console.log('[HASH-CACHE] SQLite hash cache cleanup initialized');
+        console.log(`[HASH-CACHE] ${cacheBackendLabel} hash cache cleanup initialized`);
     }).catch(err => {
-        console.error('[HASH-CACHE] SQLite hash cache init failed:', err?.message || err);
+        console.error(`[HASH-CACHE] ${cacheBackendLabel} hash cache init failed:`, err?.message || err);
     });
 }
