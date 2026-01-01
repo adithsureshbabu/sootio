@@ -8,7 +8,7 @@
 		"start:dev": "LOG_LEVEL=debug node --max-old-space-size=2048 --expose-gc cluster.js",
 		"standalone": "LOG_LEVEL=error node --max-old-space-size=2048 --expose-gc server.js",
 		"standalone:dev": "LOG_LEVEL=debug node --max-old-space-size=2048 --expose-gc server.js",
-		"dev": "LOG_LEVEL=debug node --max-old-space-size=2048 --expose-gc node_modules/.bin/nodemon server.js",
+		"dev": "LOG_LEVEL=debug NODE_OPTIONS=\"--max-old-space-size=2048 --expose-gc\" nodemon server.js",
 		"test": "node --max-old-space-size=2048 --expose-gc node_modules/.bin/jest"
 	},
 	"author": "Sooti",
