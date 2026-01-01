@@ -11,6 +11,13 @@ const HASH_DB = path.join(SQLITE_DIR, 'hash-cache.db');
 
 const BATCH_SIZE = parseInt(process.env.MIGRATION_BATCH_SIZE || '1000', 10);
 
+function normalizeSize(value) {
+  if (value == null) return null;
+  const num = Number(value);
+  if (!Number.isFinite(num)) return null;
+  return Math.round(num);
+}
+
 function buildPgConfig() {
   const connectionString = process.env.POSTGRES_URL || process.env.DATABASE_URL;
   const baseConfig = connectionString
@@ -115,7 +122,7 @@ async function migrateCache(pool) {
         service,
         hash,
         row.fileName || null,
-        typeof row.size === 'number' ? row.size : null,
+        normalizeSize(row.size),
         row.data || null,
         row.releaseKey || null,
         row.category || null,
