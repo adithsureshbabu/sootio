@@ -154,6 +154,26 @@ Sootio uses SQLite in WAL (Write-Ahead Log) mode for better performance. This cr
 **Prevention:**
 The export script now automatically checkpoints WAL files before export to prevent corruption.
 
+## SQLite -> Postgres Migration
+
+Set up a local Postgres container (using the existing `sootio-data` volume) and migrate the SQLite cache tables:
+
+```bash
+./scripts/sqlite-to-postgres.sh
+```
+
+Environment variables (optional):
+- `SOOTIO_CONTAINER` - Sootio container name (default: `sootio`)
+- `SOOTIO_POSTGRES_CONTAINER` - Postgres container name (default: `sootio-postgres`)
+- `SOOTIO_NETWORK` - Docker network name (default: `sootio-network`)
+- `SOOTIO_DATA_VOLUME` - Docker volume name (default: `sootio-data`)
+- `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`
+- `POSTGRES_HOST_PORT` - Publish Postgres on a host port (e.g., `5432`)
+- `POSTGRES_SSL` - `true/false`
+
+After migration, set `CACHE_BACKEND=postgres` in `.env` and restart the container.
+Note: `performance.db` stays SQLite-only for now.
+
 ## Troubleshooting
 
 **Container not running:**

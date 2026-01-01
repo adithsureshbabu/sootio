@@ -185,7 +185,7 @@ SQLite is **optional** but **highly recommended** for:
 - Multi-user scenarios
 - Persistent cache across restarts
 - Better performance with frequent searches
-- Shared cache across multiple addon instances
+- Single-host cache across multiple addon instances
 - Simpler setup (no separate database server needed)
 
 #### Configure SQLite in .env
@@ -207,6 +207,31 @@ When debugging is enabled, you'll see detailed logs about:
 - Cache hit/miss statistics
 - Bulk operations performance
 - Cleanup job execution
+
+---
+
+### Method 4: Optional Postgres Cache (Multi-Instance)
+
+For load-balanced or multi-VPS deployments, use Postgres as a shared cache backend.
+
+#### Configure Postgres in .env
+```env
+CACHE_BACKEND=postgres
+POSTGRES_HOST=your-postgres-host
+POSTGRES_PORT=5432
+POSTGRES_DB=sootio
+POSTGRES_USER=sootio
+POSTGRES_PASSWORD=sootio
+# Optional (for managed DBs)
+POSTGRES_SSL=true
+```
+
+#### Migrate existing SQLite cache data
+```bash
+./scripts/sqlite-to-postgres.sh
+```
+
+This keeps SQLite as the default backend unless `CACHE_BACKEND=postgres` is set. `performance.db` remains SQLite-only.
 
 ---
 
@@ -519,7 +544,7 @@ sootio-stremio-addon/
 │   ├── {provider}.js           # Debrid provider integrations (7)
 │   ├── common/
 │   │   ├── scrapers.js         # All torrent scrapers (14)
-│   │   ├── sqlite-cache.js      # SQLite cache layer
+│   │   ├── cache-store.js       # Cache backend selector (SQLite/Postgres)
 │   │   └── debrid-cache-processor.js
 │   ├── util/
 │   │   ├── debrid-proxy.js     # Proxy management

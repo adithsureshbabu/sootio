@@ -91,8 +91,8 @@ if (cluster.isMaster) {
         const { app, server, PORT, HOST } = serverModule;
 
         // Import SQLite modules for cleanup
-        sqliteCache = await import('./lib/util/sqlite-cache.js');
-        sqliteHashCache = await import('./lib/util/sqlite-hash-cache.js');
+        sqliteCache = await import('./lib/util/cache-store.js');
+        sqliteHashCache = await import('./lib/util/hash-cache-store.js');
 
         // Import rate limiters for cleanup
         rdRateLimiter = (await import('./lib/util/rd-rate-limit.js')).default;
