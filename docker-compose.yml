@@ -17,7 +17,8 @@ services:
       - .env
     environment:
       - NODE_ENV=production
-    command: ["npm", "run", "standalone"]
+      - LOG_LEVEL=error
+    command: ["node", "--max-old-space-size=384", "--expose-gc", "server.js"]
 
     restart: always
     deploy:
