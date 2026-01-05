@@ -19,8 +19,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
 import Usenet from './lib/usenet.js';
-import { resolveHttpStreamUrl, ensureGofileTokenForUrl } from './lib/http-streams.js';
-import debridProxyManager from './lib/util/debrid-proxy.js';
+import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 import { encodeUrlForStreaming } from './lib/http-streams/utils/encoding.js';
 import searchCoordinator from './lib/util/search-coordinator.js';
@@ -722,17 +721,6 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
     }
 });
 
-function isGofileDownloadUrl(rawUrl) {
-    if (!rawUrl) return false;
-    try {
-        const parsed = new URL(rawUrl);
-        const host = parsed.hostname.toLowerCase();
-        return host.endsWith('gofile.io') && parsed.pathname.includes('/download/');
-    } catch {
-        return false;
-    }
-}
-
 // HTTP Streaming resolver endpoint (for 4KHDHub, UHDMovies, etc.)
 // This endpoint provides lazy resolution - decrypts URLs only when user selects a stream
 app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
@@ -844,18 +832,6 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
                 redirectUrl = finalUrl;
             }
 
-            if (isGofileDownloadUrl(redirectUrl)) {
-                const gofileToken = await ensureGofileTokenForUrl(redirectUrl);
-                if (gofileToken) {
-                    const proxyUrl = `/proxy/gofile?url=${encodeURIComponent(redirectUrl)}&token=${encodeURIComponent(gofileToken)}`;
-                    console.log("[HTTP-RESOLVER] Redirecting to GoFile proxy for:",
-                        redirectUrl.substring(0, 100) + '...');
-                    res.redirect(302, proxyUrl);
-                    return;
-                }
-                console.log('[HTTP-RESOLVER] GoFile token unavailable, redirecting without proxy');
-            }
-
             // Encode URL to handle spaces and special characters in filenames
             const encodedUrl = encodeUrlForStreaming(redirectUrl);
             console.log("[HTTP-RESOLVER] Redirecting to final stream URL:",
@@ -867,94 +843,6 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
     } catch (error) {
         console.error("[HTTP-RESOLVER] Error occurred:", error.message);
         res.status(500).send("Error resolving HTTP stream.");
-    }
-});
-
-app.get('/proxy/gofile', async (req, res) => {
-    const rawUrl = typeof req.query.url === 'string' ? req.query.url : null;
-    const token = typeof req.query.token === 'string' ? req.query.token : null;
-
-    if (!rawUrl || !token) {
-        return res.status(400).send('Missing GoFile proxy parameters');
-    }
-    if (token.length > 200) {
-        return res.status(400).send('Invalid GoFile token');
-    }
-
-    let targetUrl;
-    try {
-        targetUrl = new URL(rawUrl);
-    } catch {
-        return res.status(400).send('Invalid GoFile URL');
-    }
-
-    if (!isGofileDownloadUrl(targetUrl.toString())) {
-        return res.status(403).send('GoFile proxy only');
-    }
-
-    try {
-        const axios = (await import('axios')).default;
-        const headers = {
-            'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': req.headers['accept'] || '*/*',
-            'Referer': 'https://gofile.io/',
-            'Origin': 'https://gofile.io',
-            'Cookie': `accountToken=${token}`,
-            'Authorization': `Bearer ${token}`
-        };
-
-        if (req.headers.range) {
-            headers['Range'] = req.headers.range;
-        }
-        if (req.headers['accept-encoding']) {
-            headers['Accept-Encoding'] = req.headers['accept-encoding'];
-        }
-
-        const response = await axios.get(targetUrl.toString(), {
-            headers,
-            httpAgent: debridProxyManager.getProxyAgent('gofile'),
-            httpsAgent: debridProxyManager.getProxyAgent('gofile'),
-            responseType: 'stream',
-            maxRedirects: 5,
-            validateStatus: (status) => status < 500
-        });
-
-        res.status(response.status);
-        const blockedHeaders = new Set([
-            'set-cookie',
-            'connection',
-            'transfer-encoding',
-            'keep-alive',
-            'proxy-authenticate',
-            'proxy-authorization',
-            'te',
-            'trailers',
-            'upgrade'
-        ]);
-        for (const [key, value] of Object.entries(response.headers || {})) {
-            if (!blockedHeaders.has(key.toLowerCase())) {
-                res.setHeader(key, value);
-            }
-        }
-
-        const stream = response.data;
-        req.on('close', () => {
-            if (stream?.destroy) {
-                stream.destroy();
-            }
-        });
-        stream.on('error', (err) => {
-            console.error('[GOFILE-PROXY] Stream error:', err.message);
-            if (!res.headersSent) {
-                res.status(502).send('GoFile proxy stream error');
-            }
-        });
-        stream.pipe(res);
-    } catch (error) {
-        console.error('[GOFILE-PROXY] Error:', error.message);
-        if (!res.headersSent) {
-            res.status(502).send('GoFile proxy failed');
-        }
     }
 });
 
