@@ -9,7 +9,7 @@
 		"standalone": "LOG_LEVEL=error node --max-old-space-size=2048 --expose-gc server.js",
 		"standalone:dev": "LOG_LEVEL=debug node --max-old-space-size=2048 --expose-gc server.js",
 		"dev": "LOG_LEVEL=debug NODE_OPTIONS=\"--max-old-space-size=2048 --expose-gc\" nodemon server.js",
-		"test": "node --max-old-space-size=2048 --expose-gc node_modules/.bin/jest"
+		"test": "node --experimental-vm-modules --max-old-space-size=2048 --expose-gc node_modules/.bin/jest"
 	},
 	"author": "Sooti",
 	"license": "MIT",
@@ -58,7 +58,9 @@
 	"devDependencies": {
 		"@jest/globals": "^30.2.0",
 		"jest": "^30.2.0",
-		"nodemon": "^3.1.7"
+		"nock": "^14.0.10",
+		"nodemon": "^3.1.7",
+		"supertest": "^7.2.2"
 	},
 	"engines": {
 		"node": "^20.x",
