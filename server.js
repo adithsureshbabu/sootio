@@ -18,11 +18,12 @@ import https from 'https';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import axios from 'axios';
 import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
 import { encodeUrlForStreaming } from './lib/http-streams/utils/encoding.js';
-import { proxyNetflixMirror, NETFLIXMIRROR_PROVIDER } from './lib/http-streams/providers/netflixmirror/proxy.js';
+import { getStreamHeaders as getNetflixMirrorHeaders } from './lib/http-streams/providers/netflixmirror/search.js';
 import searchCoordinator from './lib/util/search-coordinator.js';
 import * as scraperPerformance from './lib/util/scraper-performance.js';
 import personalFilesCache from './lib/util/personal-files-cache.js';
@@ -460,6 +461,65 @@ const STREAM_CLEANUP_INTERVAL = 2 * 60 * 1000;
 // If user was just paused/buffering, they can restart the stream
 const STREAM_INACTIVE_TIMEOUT = 10 * 60 * 1000; // 10 minutes of inactivity
 
+const NETFLIXMIRROR_PROVIDER = 'netflixmirror';
+
+function buildNetflixMirrorProxyUrl(url, baseUrl, req) {
+    try {
+        const resolved = new URL(url, baseUrl).toString();
+        return `${req.protocol}://${req.get('host')}/resolve/httpstreaming/${encodeURIComponent(resolved)}?provider=${NETFLIXMIRROR_PROVIDER}`;
+    } catch {
+        return url;
+    }
+}
+
+function rewriteNetflixMirrorPlaylist(playlistText, baseUrl, req) {
+    return playlistText
+        .split(/\r?\n/)
+        .map(line => {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed.startsWith('#')) return line;
+            if (trimmed.includes('/resolve/httpstreaming/')) return line;
+            return buildNetflixMirrorProxyUrl(trimmed, baseUrl, req);
+        })
+        .join('\n');
+}
+
+async function proxyNetflixMirror(targetUrl, req, res) {
+    try {
+        const headers = { ...getNetflixMirrorHeaders() };
+        if (req.headers.range) {
+            headers.Range = req.headers.range;
+        }
+
+        const response = await axios.get(targetUrl, {
+            responseType: 'arraybuffer',
+            headers,
+            validateStatus: () => true
+        });
+
+        const contentType = (response.headers && response.headers['content-type']) || '';
+        const isPlaylist = contentType.includes('mpegurl') || targetUrl.includes('.m3u8');
+        const statusCode = response.status || 200;
+
+        if (isPlaylist) {
+            const text = response.data.toString('utf8');
+            const rewritten = rewriteNetflixMirrorPlaylist(text, targetUrl, req);
+            res.status(statusCode).setHeader('content-type', 'application/vnd.apple.mpegurl');
+            return res.send(rewritten);
+        }
+
+        // Segment/binary response
+        res.status(statusCode);
+        Object.entries(response.headers || {}).forEach(([key, value]) => {
+            res.setHeader(key, value);
+        });
+        return res.send(response.data);
+    } catch (error) {
+        console.error(`[HTTP-RESOLVER] NetflixMirror proxy failed: ${error.message}`);
+        return res.status(502).send('Failed to proxy NetflixMirror stream');
+    }
+}
+
 
 // Performance: Set up connection pooling and reuse
 app.set('trust proxy', true); // Trust proxy headers if behind reverse proxy
@@ -734,12 +794,7 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
         decodedUrl.includes('tech.creativeexpressionsblog.com') ||
         decodedUrl.includes('tech.examzculture.in');
 
-    const looksLikeNetflixMirror = provider === NETFLIXMIRROR_PROVIDER ||
-        decodedUrl.includes('net51.cc/hls/') ||
-        decodedUrl.includes('net20.cc/hls/') ||
-        decodedUrl.includes('nfmirror');
-
-    if (looksLikeNetflixMirror) {
+    if (provider === NETFLIXMIRROR_PROVIDER) {
         return proxyNetflixMirror(decodedUrl, req, res);
     }
 
