@@ -31,6 +31,9 @@ import crypto from 'crypto';
 import { obfuscateSensitive } from './lib/common/torrent-utils.js';
 import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
+import fetch from 'node-fetch';
+import { rewriteNetflixMirrorPlaylist, detectNetflixMirrorPayloadType, stripNetflixMirrorSegmentSuffix } from './lib/http-streams/providers/netflixmirror/proxy.js';
+import { bypass as bypassNetflixMirror, getStreamHeaders as getNetflixMirrorStreamHeaders } from './lib/http-streams/providers/netflixmirror/search.js';
 
 // Bot detection and anti-scraping utilities
 const BOT_USER_AGENTS = [
@@ -93,6 +96,10 @@ const FAST_REQUEST_THRESHOLD = 1000; // 1 second - for detecting rapid requests
 
 // Bot detection middleware with pattern analysis
 function botDetectionMiddleware(req, res, next) {
+    // Allow resolver endpoints to bypass bot detection (needed for HLS segment spam)
+    if (req.path.startsWith('/resolve/httpstreaming')) {
+        return next();
+    }
     const clientIp = requestIp.getClientIp(req);
     const userAgent = req.get('User-Agent') || '';
     const acceptHeader = req.get('Accept') || '';
@@ -726,6 +733,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
 app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
     const { url } = req.params;
     const decodedUrl = decodeURIComponent(url);
+    if ((req.query.provider || '').toLowerCase() === 'netflixmirror') {
+        return proxyNetflixMirrorStream(decodedUrl, req, res);
+    }
     const isUHDMoviesUrl = decodedUrl.includes('driveleech') ||
         decodedUrl.includes('driveseed') ||
         decodedUrl.includes('tech.unblockedgames.world') ||
@@ -845,6 +855,133 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
         res.status(500).send("Error resolving HTTP stream.");
     }
 });
+
+async function proxyNetflixMirrorStream(decodedUrl, req, res) {
+    const targetUrl = stripNetflixMirrorSegmentSuffix(decodedUrl);
+
+    try {
+        const baseHeaders = getNetflixMirrorStreamHeaders() || {};
+        const bypassCookie = await bypassNetflixMirror();
+        const cookieParts = [];
+
+        if (baseHeaders.Cookie) cookieParts.push(baseHeaders.Cookie);
+        if (bypassCookie) {
+            cookieParts.push(`t_hash_t=${bypassCookie}`, 'ott=nf');
+        }
+
+        const headers = {
+            ...baseHeaders,
+            Cookie: cookieParts.filter(Boolean).join('; '),
+            'Accept-Encoding': 'identity'
+        };
+
+        if (req.headers.range) {
+            headers.Range = req.headers.range;
+        }
+
+        Object.keys(headers).forEach(key => {
+            if (headers[key] == null || headers[key] === '') {
+                delete headers[key];
+            }
+        });
+
+        const upstream = await fetch(targetUrl, { headers, redirect: 'follow' });
+        const contentType = upstream.headers.get('content-type') || '';
+
+        if (!upstream.ok) {
+            console.error(`[HTTP-RESOLVER] NetflixMirror upstream error ${upstream.status} for ${targetUrl}`);
+            res.status(upstream.status).send('Failed to fetch NetflixMirror resource');
+            return;
+        }
+
+        const isPlaylist = contentType.includes('mpegurl') || targetUrl.toLowerCase().endsWith('.m3u8');
+
+        if (isPlaylist) {
+            const playlistText = await upstream.text();
+            const resolverProto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
+            const resolverBase = `${resolverProto}://${req.get('host')}`;
+            if (!playlistText.includes('#EXTM3U')) {
+                console.error(`[HTTP-RESOLVER] NetflixMirror playlist missing #EXTM3U, body starts: ${playlistText.substring(0, 120)}`);
+                res.status(502).send('Invalid playlist from NetflixMirror');
+                return;
+            }
+            const rewritten = rewriteNetflixMirrorPlaylist(playlistText, targetUrl, resolverBase);
+            res.set('Content-Type', 'application/vnd.apple.mpegurl');
+            res.set('Cache-Control', 'no-store');
+            res.send(rewritten);
+            return;
+        }
+
+        const contentLength = upstream.headers.get('content-length');
+        const contentRange = upstream.headers.get('content-range');
+        const acceptRanges = upstream.headers.get('accept-ranges');
+        const reader = upstream.body?.getReader ? upstream.body.getReader() : null;
+
+        if (!reader) {
+            const buffer = Buffer.from(await upstream.arrayBuffer());
+            const finalType = detectNetflixMirrorPayloadType(buffer, contentType || 'application/octet-stream');
+
+            res.status(upstream.status);
+            res.set('Content-Type', finalType || 'application/octet-stream');
+            if (contentLength) res.set('Content-Length', contentLength);
+            if (contentRange) res.set('Content-Range', contentRange);
+            if (acceptRanges) res.set('Accept-Ranges', acceptRanges);
+            res.set('Cache-Control', 'no-store');
+            res.send(buffer);
+            return;
+        }
+
+        const sniffChunks = [];
+        let done = false;
+        while (!done && Buffer.concat(sniffChunks).length < 400) {
+            const { done: isDone, value } = await reader.read();
+            if (isDone) {
+                done = true;
+                break;
+            }
+            sniffChunks.push(Buffer.from(value));
+        }
+        const sniffBuffer = Buffer.concat(sniffChunks);
+        const finalType = detectNetflixMirrorPayloadType(sniffBuffer, contentType || 'application/octet-stream');
+
+        res.status(upstream.status);
+        res.set('Content-Type', finalType || 'application/octet-stream');
+        if (contentLength) res.set('Content-Length', contentLength);
+        if (contentRange) res.set('Content-Range', contentRange);
+        if (acceptRanges) res.set('Accept-Ranges', acceptRanges);
+        res.set('Cache-Control', 'no-store');
+
+        if (sniffBuffer.length > 0) {
+            res.write(sniffBuffer);
+        }
+
+        if (done) {
+            res.end();
+            return;
+        }
+
+        const pump = async () => {
+            while (true) {
+                const { done: isDone, value } = await reader.read();
+                if (isDone) break;
+                res.write(Buffer.from(value));
+            }
+            res.end();
+        };
+
+        pump().catch(err => {
+            console.error(`[HTTP-RESOLVER] NetflixMirror stream pump failed: ${err.message}`);
+            if (!res.headersSent) {
+                res.status(502).send('Failed to proxy NetflixMirror stream');
+            } else {
+                res.destroy(err);
+            }
+        });
+    } catch (error) {
+        console.error(`[HTTP-RESOLVER] NetflixMirror proxy failed: ${error.message}`);
+        res.status(502).send('Failed to proxy NetflixMirror stream');
+    }
+}
 
 // Middleware to check admin token
 function checkAdminAuth(req, res, next) {
