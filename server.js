@@ -100,7 +100,8 @@ function botDetectionMiddleware(req, res, next) {
     if (req.path.startsWith('/resolve/httpstreaming')) {
         return next();
     }
-    const clientIp = requestIp.getClientIp(req);
+    const clientIp = req.clientIp || requestIp.getClientIp(req);
+    req.clientIp = clientIp;
     const userAgent = req.get('User-Agent') || '';
     const acceptHeader = req.get('Accept') || '';
     const acceptEncoding = req.get('Accept-Encoding') || '';
@@ -270,11 +271,15 @@ process.on('uncaughtException', (error) => {
 
 // Import compression if available, otherwise provide a no-op middleware
 let compression = null;
+let compressionFilter = null;
 try {
-  compression = (await import('compression')).default;
+  const compressionModule = await import('compression');
+  compression = compressionModule.default;
+  compressionFilter = compressionModule.filter;
 } catch (e) {
   console.warn('Compression middleware not available, using no-op middleware');
   compression = () => (req, res, next) => next(); // No-op if compression not available
+  compressionFilter = () => true;
 }
 
 
@@ -354,6 +359,14 @@ async function getCacheValue(cacheKey) {
 
 const app = express();
 
+// Cache client IP on the request once to avoid repeated lookups in downstream middleware
+app.use((req, res, next) => {
+    if (!req.clientIp) {
+        req.clientIp = requestIp.getClientIp(req);
+    }
+    next();
+});
+
 app.get('/', (req, res) => {
     res.redirect('/configure');
 });
@@ -365,13 +378,6 @@ app.get('/configure', (req, res) => {
 app.get('/manifest-no-catalogs.json', (req, res) => {
     const manifest = getManifest({}, true);
     res.json(manifest);
-});
-
-app.use((req, res, next) => {
-    if (['/', '/configure', '/manifest-no-catalogs.json'].includes(req.path) || req.path.startsWith('/resolve/') || req.path.startsWith('/usenet/') || req.path.startsWith('/admin/')) {
-        return next();
-    }
-    serverless(req, res);
 });
 
 // Track active Usenet streams: nzoId -> { lastAccess, streamCount, config, videoFilePath, usenetConfig }
@@ -476,10 +482,18 @@ app.use(cors());
 // Anti-bot detection middleware
 app.use(botDetectionMiddleware);
 
+const COMPRESSION_SKIP_PREFIXES = ['/resolve', '/usenet']; // Skip compression for streaming/redirect-heavy paths to save CPU
+
 // Performance: Add compression for API responses
 app.use(compression({
     level: 6, // Balanced compression level
-    threshold: 1024 // Only compress responses larger than 1KB
+    threshold: 1024, // Only compress responses larger than 1KB
+    filter: (req, res) => {
+        if (COMPRESSION_SKIP_PREFIXES.some(prefix => req.path.startsWith(prefix))) {
+            return false;
+        }
+        return compressionFilter(req, res);
+    }
 }));
 
 // Swagger stats middleware (unchanged)
@@ -494,7 +508,7 @@ const globalRateLimiter = rateLimit({
     limit: 400, // Increased from 200 to 400 requests per window
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => requestIp.getClientIp(req),
+    keyGenerator: (req) => req.clientIp || requestIp.getClientIp(req),
     message: {
         success: false,
         message: 'Too many requests from this IP, please try again later.'
@@ -512,29 +526,12 @@ const resolveRateLimiter = rateLimit({
     limit: 80, // Increased from 40 to 80 resolve requests per window
     standardHeaders: true,
     legacyHeaders: false,
-    keyGenerator: (req) => requestIp.getClientIp(req),
+    keyGenerator: (req) => req.clientIp || requestIp.getClientIp(req),
     message: {
         success: false,
         message: 'Too many resolve requests from this IP, please try again later.'
     }
 });
-
-// Tune server timeouts for high traffic and keep-alive performance
-try {
-    server.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT || "65000", 10);
-    server.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT || "72000", 10);
-
-    // Additional performance optimizations for HTTP server
-    server.timeout = parseInt(process.env.HTTP_TIMEOUT || "120000", 10); // 2 minutes default
-    server.maxHeadersCount = parseInt(process.env.HTTP_MAX_HEADERS_COUNT || "50", 10); // Reduce memory usage from headers
-
-    // Performance: Optimize socket handling for multi-user support
-    // Increased default from 200 to 500 for better scalability
-    // Each user typically uses 1-2 concurrent connections
-    server.maxConnections = parseInt(process.env.HTTP_MAX_CONNECTIONS || "500", 10);
-
-    console.log(`[SERVER] HTTP Configuration: maxConnections=${server.maxConnections}, keepAliveTimeout=${server.keepAliveTimeout}ms, timeout=${server.timeout}ms`);
-} catch (_) {}
 
 // Graceful shutdown - properly close all connections
 let isShuttingDown = false;
@@ -611,7 +608,8 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
     }
 
     const decodedUrl = decodeURIComponent(url);
-    const clientIp = requestIp.getClientIp(req);
+    const clientIp = req.clientIp || requestIp.getClientIp(req);
+    req.clientIp = clientIp;
 
     // Extract config from query if provided (for NZB resolution)
     const configParam = req.query.config;
@@ -3354,6 +3352,22 @@ app.use((req, res, next) => {
     serverless(req, res, next);
 });
 
+function applyHttpServerTuning(serverInstance) {
+    if (!serverInstance) return;
+
+    try {
+        serverInstance.keepAliveTimeout = parseInt(process.env.HTTP_KEEPALIVE_TIMEOUT || "65000", 10);
+        serverInstance.headersTimeout = parseInt(process.env.HTTP_HEADERS_TIMEOUT || "72000", 10);
+        serverInstance.timeout = parseInt(process.env.HTTP_TIMEOUT || "120000", 10); // 2 minutes default
+        serverInstance.maxHeadersCount = parseInt(process.env.HTTP_MAX_HEADERS_COUNT || "50", 10);
+        serverInstance.maxConnections = parseInt(process.env.HTTP_MAX_CONNECTIONS || "500", 10);
+
+        console.log(`[SERVER] HTTP Configuration: maxConnections=${serverInstance.maxConnections}, keepAliveTimeout=${serverInstance.keepAliveTimeout}ms, timeout=${serverInstance.timeout}ms`);
+    } catch (error) {
+        console.error(`[SERVER] HTTP tuning failed: ${error.message}`);
+    }
+}
+
 const HOST = process.env.HOST || '0.0.0.0';
 const PORT = process.env.PORT || 7000;  // Consistent port definition
 
@@ -3385,6 +3399,7 @@ if (import.meta.url === `file://${__filename}`) {
     server = app.listen(PORT, HOST, () => {
         console.log('HTTP server listening on port: ' + server.address().port);
     });
+    applyHttpServerTuning(server);
     
     // Handle graceful shutdown for standalone mode
     process.on('SIGINT', () => {
