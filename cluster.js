@@ -12,46 +12,114 @@ overrideConsole();
 // CRITICAL: Global error handlers to prevent memory leaks from unhandled errors
 process.on('unhandledRejection', (reason, promise) => {
     console.error('[CRITICAL] Unhandled Promise Rejection:', reason?.message || reason);
-    // Don't log the full error object to avoid retaining large response bodies in memory
 });
 
 process.on('uncaughtException', (error) => {
     console.error('[CRITICAL] Uncaught Exception:', error?.message || error);
-    // Don't log the full error object to avoid retaining large response bodies in memory
 });
 
 const numCPUs = os.cpus().length;
+const totalMemoryGB = os.totalmem() / (1024 ** 3);
 
-// Determine number of workers: use CPU count as optimal default, with MAX_WORKERS override
-const maxWorkers = parseInt(process.env.MAX_WORKERS) || numCPUs;
-const workersToUse = Math.min(maxWorkers, numCPUs, 32); // Cap at 32 workers as a reasonable upper limit
+// Worker calculation for I/O-bound workloads (web servers benefit from more workers than CPUs)
+// Formula: base on CPU count with I/O multiplier, constrained by memory (each worker ~150-300MB)
+const memoryPerWorkerGB = 0.25; // Conservative estimate per worker
+const maxWorkersByMemory = Math.floor(totalMemoryGB / memoryPerWorkerGB * 0.7); // Use 70% of memory max
+const ioMultiplier = parseFloat(process.env.WORKER_IO_MULTIPLIER) || 2; // I/O bound apps benefit from 2-4x CPUs
+const calculatedWorkers = Math.ceil(numCPUs * ioMultiplier);
 
-// Optimize worker configuration for better performance
-// Increase thread pool size for more parallel I/O operations (HTTP requests, file operations)
-// Default Node.js is 4, we scale based on CPU count for better parallelism
-process.env.UV_THREADPOOL_SIZE = Math.max(16, Math.min(numCPUs * 4, 128)); // More aggressive thread pool for I/O
+// Environment overrides for fine-tuning
+const envMaxWorkers = parseInt(process.env.MAX_WORKERS, 10) || 128;
+const envMinWorkers = parseInt(process.env.MIN_WORKERS, 10) || numCPUs;
+
+// Final worker count: balance CPU multiplier, memory limits, and env config
+const workersToUse = Math.max(
+    envMinWorkers,
+    Math.min(calculatedWorkers, maxWorkersByMemory, envMaxWorkers)
+);
+
+// UV_THREADPOOL_SIZE optimization for high I/O throughput
+// Scale aggressively for I/O-bound workloads, capped at 1024 (libuv max)
+const threadPoolSize = parseInt(process.env.UV_THREADPOOL_SIZE, 10) ||
+    Math.max(32, Math.min(numCPUs * 8, 1024));
+process.env.UV_THREADPOOL_SIZE = threadPoolSize;
+
+// Enable round-robin scheduling for better load distribution across workers
+cluster.schedulingPolicy = cluster.SCHED_RR;
 
 if (cluster.isMaster) {
     console.log(`Master process ${process.pid} is running`);
-    console.log(`Number of CPUs: ${numCPUs}`);
-    console.log(`Requested workers: ${maxWorkers}`);
-    console.log(`Using ${workersToUse} worker processes (max: ${maxWorkers}, CPUs: ${numCPUs})`);
-    console.log(`UV_THREADPOOL_SIZE set to: ${process.env.UV_THREADPOOL_SIZE}`);
+    console.log(`System: ${numCPUs} CPUs, ${totalMemoryGB.toFixed(1)}GB RAM`);
+    console.log(`Workers: ${workersToUse} (calculated: ${calculatedWorkers}, memory-limited: ${maxWorkersByMemory})`);
+    console.log(`Thread pool: ${process.env.UV_THREADPOOL_SIZE} | Scheduling: Round-Robin`);
+    console.log(`Config: MIN_WORKERS=${envMinWorkers}, MAX_WORKERS=${envMaxWorkers}, IO_MULTIPLIER=${ioMultiplier}`);
 
     // Start memory monitoring in master process
     memoryMonitor.startMonitoring();
 
-    // Fork workers
-    for (let i = 0; i < workersToUse; i++) {
+    // Track worker restarts for crash loop detection
+    const workerRestarts = new Map(); // pid -> { count, lastRestart }
+    const RESTART_WINDOW_MS = 60000; // 1 minute window
+    const MAX_RESTARTS_PER_WINDOW = 5;
+    const RESTART_BACKOFF_MS = 2000; // Base backoff delay
+
+    // Fork workers with staggered startup to reduce initial load spike
+    const STAGGER_DELAY_MS = 50;
+    let workersStarted = 0;
+
+    const forkWorker = () => {
         const worker = cluster.fork();
-        console.log(`Worker ${i + 1}/${workersToUse} started (PID: ${worker.process.pid})`);
+        workersStarted++;
+        console.log(`Worker ${workersStarted}/${workersToUse} started (PID: ${worker.process.pid})`);
+        return worker;
+    };
+
+    // Staggered worker startup
+    for (let i = 0; i < workersToUse; i++) {
+        setTimeout(() => forkWorker(), i * STAGGER_DELAY_MS);
     }
 
-    // Handle worker exits
+    // Handle worker exits with crash loop protection
     cluster.on('exit', (worker, code, signal) => {
-        console.log(`Worker ${worker.process.pid} died with code: ${code}, signal: ${signal}`);
-        console.log('Starting a new worker...');
-        cluster.fork();
+        const pid = worker.process.pid;
+        const now = Date.now();
+
+        console.log(`Worker ${pid} exited (code: ${code}, signal: ${signal})`);
+
+        // Track restarts for crash loop detection
+        let restartInfo = workerRestarts.get(pid) || { count: 0, lastRestart: 0 };
+
+        // Reset counter if outside window
+        if (now - restartInfo.lastRestart > RESTART_WINDOW_MS) {
+            restartInfo = { count: 0, lastRestart: now };
+        }
+
+        restartInfo.count++;
+        restartInfo.lastRestart = now;
+        workerRestarts.set(pid, restartInfo);
+
+        // Calculate backoff delay based on restart count
+        const backoffDelay = Math.min(
+            RESTART_BACKOFF_MS * Math.pow(2, restartInfo.count - 1),
+            30000 // Max 30 second backoff
+        );
+
+        if (restartInfo.count > MAX_RESTARTS_PER_WINDOW) {
+            console.error(`Worker crash loop detected (${restartInfo.count} restarts in ${RESTART_WINDOW_MS}ms). Delaying restart by ${backoffDelay}ms`);
+        }
+
+        // Restart worker with backoff
+        setTimeout(() => {
+            console.log('Starting replacement worker...');
+            cluster.fork();
+        }, restartInfo.count > 1 ? backoffDelay : 100);
+
+        // Cleanup old restart tracking entries
+        for (const [oldPid, info] of workerRestarts.entries()) {
+            if (now - info.lastRestart > RESTART_WINDOW_MS * 2) {
+                workerRestarts.delete(oldPid);
+            }
+        }
     });
 
     // Graceful shutdown
@@ -119,10 +187,23 @@ if (cluster.isMaster) {
                 console.log(`Worker ${process.pid} server listening on port ${port}`);
             });
 
+            // Tune HTTP server for high concurrency
+            workerServer.keepAliveTimeout = 65000; // Slightly higher than typical LB timeout (60s)
+            workerServer.headersTimeout = 66000; // Must be > keepAliveTimeout
+            workerServer.maxConnections = 0; // Unlimited connections per worker
+            workerServer.timeout = 120000; // 2 minute request timeout
+
             // Export server for the worker process to use for cleanup
             global.workerServer = workerServer;
         } else {
             console.log(`Worker ${process.pid} using existing server on port ${PORT}`);
+            // Apply same tuning to existing server
+            if (server) {
+                server.keepAliveTimeout = 65000;
+                server.headersTimeout = 66000;
+                server.maxConnections = 0;
+                server.timeout = 120000;
+            }
         }
     } catch (error) {
         console.error(`Worker ${process.pid} failed to start:`, error);

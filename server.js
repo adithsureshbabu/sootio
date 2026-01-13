@@ -131,7 +131,7 @@ function botDetectionMiddleware(req, res, next) {
         firstSeen: currentTime,
         isBlocked: false,
         requestHistory: [],
-        lastRequestTime: currentTime
+        lastRequestTime: 0  // Set to 0 so first request isn't flagged as rapid
     };
 
     // Add current request to history
