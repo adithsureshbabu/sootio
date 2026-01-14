@@ -628,15 +628,23 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
             console.log('[RESOLVER] Failed to parse config from query', e.message);
         }
     }
+    const cacheKey = typeof req.query.cacheKey === 'string' ? req.query.cacheKey : null;
+    const cacheHash = typeof req.query.cacheHash === 'string' ? req.query.cacheHash : null;
+    if (cacheKey && cacheKey.length < 512) {
+        config.cacheKey = cacheKey;
+    }
+    if (cacheHash && cacheHash.length < 128) {
+        config.cacheHash = cacheHash;
+    }
 
     // Use provider + hash of URL as cache key to avoid storing decoded URLs with API keys
     const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
-    const cacheKey = `${debridProvider}:${cacheKeyHash}`;
+    const resolverCacheKey = `${debridProvider}:${cacheKeyHash}`;
 
     try {
         let finalUrl;
 
-        const cachedValue = await getCacheValue(cacheKey);
+        const cachedValue = await getCacheValue(resolverCacheKey);
         if (cachedValue) {
             // Handle case where cachedValue might be an object from UHDMovies resolver
             if (cachedValue && typeof cachedValue === 'object' && cachedValue.url) {
@@ -645,9 +653,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
                 finalUrl = cachedValue;
             }
             console.log(`[CACHE] Using cached URL for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
-        } else if (PENDING_RESOLVES.has(cacheKey)) {
+        } else if (PENDING_RESOLVES.has(resolverCacheKey)) {
             console.log(`[RESOLVER] Joining in-flight resolve for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
-            finalUrl = await PENDING_RESOLVES.get(cacheKey);
+            finalUrl = await PENDING_RESOLVES.get(resolverCacheKey);
             // Handle case where finalUrl might be an object from UHDMovies resolver
             if (finalUrl && typeof finalUrl === 'object' && finalUrl.url) {
                 finalUrl = finalUrl.url;
@@ -680,9 +688,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
                 console.error(`[RESOLVER] Pending resolve failed: ${err.message}`);
                 return null;
             }).finally(() => {
-                PENDING_RESOLVES.delete(cacheKey);
+                PENDING_RESOLVES.delete(resolverCacheKey);
             });
-            PENDING_RESOLVES.set(cacheKey, pendingRequest);
+            PENDING_RESOLVES.set(resolverCacheKey, pendingRequest);
 
             finalUrl = await pendingRequest;
 
@@ -698,7 +706,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
                 // MEMORY LEAK FIX: Use new cache function with proper timer tracking
                 // Make cache TTL configurable for better performance tuning
                 const cacheTtlMs = parseInt(process.env.RESOLVE_CACHE_TTL_MS || '900000', 10); // 15 min default (reduced from 2 hours)
-                await setCacheWithTimer(cacheKey, cacheUrl, cacheTtlMs);
+                await setCacheWithTimer(resolverCacheKey, cacheUrl, cacheTtlMs);
             }
         }
 

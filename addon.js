@@ -4,9 +4,9 @@ import CatalogProvider from './lib/catalog-provider.js'
 import { getManifest } from './lib/util/manifest.js'
 import { obfuscateSensitive } from './lib/common/torrent-utils.js'
 
-const CACHE_MAX_AGE = parseInt(process.env.CACHE_MAX_AGE) || 1 * 60 // 1 min
-const STALE_REVALIDATE_AGE = 1 * 60 // 1 min
-const STALE_ERROR_AGE = 1 * 24 * 60 * 60 // 1 days
+const CACHE_MAX_AGE = parseInt(process.env.CACHE_MAX_AGE) || 60 * 60 // 1 hour (like Torrentio)
+const STALE_REVALIDATE_AGE = 4 * 60 * 60 // 4 hours (like Torrentio)
+const STALE_ERROR_AGE = 7 * 24 * 60 * 60 // 7 days (like Torrentio)
 
 const builder = new addonBuilder(getManifest())
 
@@ -189,6 +189,7 @@ builder.defineStreamHandler(args => {
 function enrichCacheParams() {
     return {
         cacheMaxAge: CACHE_MAX_AGE,
+        staleRevalidate: STALE_REVALIDATE_AGE,
         staleError: STALE_ERROR_AGE
     }
 }

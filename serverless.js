@@ -98,7 +98,13 @@ router.get('/resolve/:debridProvider/:debridApiKey/:id/:hostUrl', limiter, (req,
         return res.status(400).send('Missing or invalid hostUrl parameter')
     }
 
-    StreamProvider.resolveUrl(req.params.debridProvider, req.params.debridApiKey, req.params.id, decodedHostUrl, clientIp)
+    const cacheKey = typeof req.query.cacheKey === 'string' ? req.query.cacheKey : null;
+    const cacheHash = typeof req.query.cacheHash === 'string' ? req.query.cacheHash : null;
+    const resolveConfig = {};
+    if (cacheKey && cacheKey.length < 512) resolveConfig.cacheKey = cacheKey;
+    if (cacheHash && cacheHash.length < 128) resolveConfig.cacheHash = cacheHash;
+
+    StreamProvider.resolveUrl(req.params.debridProvider, req.params.debridApiKey, req.params.id, decodedHostUrl, clientIp, resolveConfig)
         .then(url => {
             res.redirect(url)
         })
@@ -121,7 +127,13 @@ router.get('/resolve/:debridProvider/:debridApiKey/:url', limiter, (req, res) =>
     const decodedUrl = decodeURIComponent(url);
     const clientIp = requestIp.getClientIp(req);
 
-    StreamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp)
+    const cacheKey = typeof req.query.cacheKey === 'string' ? req.query.cacheKey : null;
+    const cacheHash = typeof req.query.cacheHash === 'string' ? req.query.cacheHash : null;
+    const resolveConfig = {};
+    if (cacheKey && cacheKey.length < 512) resolveConfig.cacheKey = cacheKey;
+    if (cacheHash && cacheHash.length < 128) resolveConfig.cacheHash = cacheHash;
+
+    StreamProvider.resolveUrl(debridProvider, debridApiKey, null, decodedUrl, clientIp, resolveConfig)
         .then(url => {
             if (url) {
                 res.redirect(url)
