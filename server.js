@@ -1012,6 +1012,45 @@ function checkAdminAuth(req, res, next) {
 
 
 
+// Endpoint to verify MediaFlow proxy connectivity
+app.get('/verify-proxy', async (req, res) => {
+    const { url, password } = req.query;
+
+    if (!url) {
+        return res.json({ success: false, error: 'Proxy URL is required' });
+    }
+
+    try {
+        // Normalize URL - remove trailing slash
+        const baseUrl = url.replace(/\/+$/, '');
+        const verifyUrl = `${baseUrl}/proxy/ip` + (password ? `?api_password=${encodeURIComponent(password)}` : '');
+
+        const response = await fetch(verifyUrl, {
+            method: 'GET',
+            timeout: 10000,
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
+
+        if (!response.ok) {
+            return res.json({
+                success: false,
+                error: `Proxy returned status ${response.status}: ${response.statusText}`
+            });
+        }
+
+        const data = await response.json().catch(() => ({}));
+        res.json({ success: true, ip: data.ip || data.origin || 'verified' });
+    } catch (error) {
+        console.error('[PROXY-VERIFY] Error verifying proxy:', error.message);
+        res.json({
+            success: false,
+            error: error.message || 'Failed to connect to proxy'
+        });
+    }
+});
+
 // Endpoint to clear SQLite search cache (stream results)
 app.get('/admin/clear-search-cache', checkAdminAuth, async (req, res) => {
     const result = await sqliteCache.clearSearchCache();
