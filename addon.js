@@ -76,7 +76,7 @@ builder.defineCatalogHandler((args) => {
                     console.log(`[CATALOG-HANDLER] ========== CATALOG REQUEST END ==========`)
                     resolve({
                         metas,
-                        ...enrichCacheParams()
+                        ...enrichCacheParams(metas && metas.length > 0)
                     })
                 })
                 .catch(err => {
@@ -95,7 +95,7 @@ builder.defineCatalogHandler((args) => {
                         console.log("Response metas: " + JSON.stringify(metas))
                         resolve({
                             metas,
-                            ...enrichCacheParams()
+                            ...enrichCacheParams(metas && metas.length > 0)
                         })
                     })
                     .catch(err => {
@@ -109,7 +109,7 @@ builder.defineCatalogHandler((args) => {
                         console.log("Response metas: " + JSON.stringify(metas))
                         resolve({
                             metas,
-                            ...enrichCacheParams()
+                            ...enrichCacheParams(metas && metas.length > 0)
                         })
                     })
                     .catch(err => {
@@ -122,7 +122,7 @@ builder.defineCatalogHandler((args) => {
             console.log(`[CATALOG-HANDLER] Unknown catalog ID: ${args.id}. Returning empty catalog.`);
             resolve({
                 metas: [],
-                ...enrichCacheParams()
+                ...enrichCacheParams(false)
             })
         }
     })
@@ -133,7 +133,7 @@ builder.defineCatalogHandler((args) => {
 builder.defineStreamHandler(args => {
     return new Promise((resolve, reject) => {
         if (!args.id.match(/tt\d+/i)) {
-            resolve({ streams: [] })
+            resolve({ streams: [], ...enrichCacheParams(false) })
             return
         }
 
@@ -159,7 +159,7 @@ builder.defineStreamHandler(args => {
                         console.log("Response streams: " + obfuscateSensitive(JSON.stringify(streams), keysToObfuscate))
                         resolve({
                             streams,
-                            ...enrichCacheParams()
+                            ...enrichCacheParams(streams && streams.length > 0)
                         })
                     })
                     .catch(err => reject(err))
@@ -174,19 +174,27 @@ builder.defineStreamHandler(args => {
                         console.log("Response streams: " + obfuscateSensitive(JSON.stringify(streams), keysToObfuscate))
                         resolve({
                             streams,
-                            ...enrichCacheParams()
+                            ...enrichCacheParams(streams && streams.length > 0)
                         })
                     })
                     .catch(err => reject(err))
                 break
             default:
-                results = resolve({ streams: [] })
+                resolve({ streams: [], ...enrichCacheParams(false) })
                 break
         }
     })
 })
 
-function enrichCacheParams() {
+function enrichCacheParams(hasResults = true) {
+    // Don't cache empty results - allows Cloudflare to fetch fresh data on next request
+    if (!hasResults) {
+        return {
+            cacheMaxAge: 0,
+            staleRevalidate: 0,
+            staleError: 0
+        }
+    }
     return {
         cacheMaxAge: CACHE_MAX_AGE,
         staleRevalidate: STALE_REVALIDATE_AGE,
