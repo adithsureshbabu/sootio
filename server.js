@@ -747,6 +747,14 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
         decodedUrl.includes('tech.unblockedgames.world') ||
         decodedUrl.includes('tech.creativeexpressionsblog.com') ||
         decodedUrl.includes('tech.examzculture.in');
+    const isMkvDramaResolveUrl = decodedUrl.includes('mkvdrama.net') ||
+        decodedUrl.includes('mkv_token=') ||
+        decodedUrl.includes('ouo.io') ||
+        decodedUrl.includes('ouo.press') ||
+        decodedUrl.includes('oii.la') ||
+        decodedUrl.includes('viewcrate.cc') ||
+        decodedUrl.includes('filecrypt.cc') ||
+        decodedUrl.includes('filecrypt.co');
 
     // Use hash of URL as cache key
     const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
@@ -796,7 +804,10 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             // Set timeout for HTTP stream resolution
             const baseTimeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10);
             const uhdTimeoutMs = parseInt(process.env.UHDMOVIES_RESOLVE_TIMEOUT || '25000', 10);
-            const timeoutMs = isUHDMoviesUrl ? Math.max(baseTimeoutMs, uhdTimeoutMs) : baseTimeoutMs;
+            const mkvDramaTimeoutMs = parseInt(process.env.MKVDRAMA_HTTP_RESOLVE_TIMEOUT || '30000', 10);
+            const timeoutMs = isUHDMoviesUrl
+                ? Math.max(baseTimeoutMs, uhdTimeoutMs)
+                : (isMkvDramaResolveUrl ? Math.max(baseTimeoutMs, mkvDramaTimeoutMs) : baseTimeoutMs);
             const timedResolve = Promise.race([
                 resolvePromise,
                 new Promise((_, reject) =>
