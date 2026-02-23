@@ -1082,6 +1082,14 @@ app.get('/admin/clear-all-cache', checkAdminAuth, async (req, res) => {
     res.json(result);
 });
 
+// Endpoint to clear all scraper penalties and reset consecutive failure counters
+// Useful when a proxy/network outage caused mass penalization of otherwise-healthy scrapers
+app.get('/admin/clear-scraper-penalties', checkAdminAuth, (req, res) => {
+    const tracker = scraperPerformance.default;
+    tracker.clearAllPenalties();
+    res.json({ success: true, message: 'All scraper penalties cleared and counters reset' });
+});
+
 
 
 // Endpoint to view active Usenet streams

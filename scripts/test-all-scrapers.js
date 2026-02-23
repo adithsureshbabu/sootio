@@ -17,6 +17,7 @@ import { searchExtTo } from '../lib/scrapers/public-trackers/extto.js';
 import { searchTorrentDownload } from '../lib/scrapers/public-trackers/torrentdownload.js';
 import { searchIlCorsaroNero } from '../lib/scrapers/public-trackers/ilcorsaronero.js';
 import { searchTorrent9 } from '../lib/scrapers/public-trackers/torrent9.js';
+import { searchLimeTorrents } from '../lib/scrapers/public-trackers/limetorrents.js';
 
 // Import specialized scrapers
 import { searchSnowfl } from '../lib/scrapers/specialized/snowfl.js';
@@ -36,6 +37,7 @@ const scrapers = [
     { name: 'TorrentDownload', fn: searchTorrentDownload },
     { name: 'IlCorsaroNero', fn: searchIlCorsaroNero },
     { name: 'Torrent9', fn: searchTorrent9 },
+    { name: 'LimeTorrents', fn: (q, s, lp, cfg) => searchLimeTorrents(q, s, cfg, lp) },
     { name: 'Snowfl', fn: searchSnowfl },
 ];
 
