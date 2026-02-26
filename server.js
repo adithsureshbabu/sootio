@@ -33,7 +33,7 @@ import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
 import fetch from 'node-fetch';
 import { rewriteNetflixMirrorPlaylist, detectNetflixMirrorPayloadType, stripNetflixMirrorSegmentSuffix } from './lib/http-streams/providers/netflixmirror/proxy.js';
-import { bypass as bypassNetflixMirror, getStreamHeaders as getNetflixMirrorStreamHeaders } from './lib/http-streams/providers/netflixmirror/search.js';
+import { getNetflixMirrorProxyHeaders } from './lib/http-streams/providers/netflixmirror/search.js';
 
 // Bot detection and anti-scraping utilities
 const BOT_USER_AGENTS = [
@@ -884,18 +884,9 @@ async function proxyNetflixMirrorStream(decodedUrl, req, res) {
     const targetUrl = stripNetflixMirrorSegmentSuffix(decodedUrl);
 
     try {
-        const baseHeaders = getNetflixMirrorStreamHeaders() || {};
-        const bypassCookie = await bypassNetflixMirror();
-        const cookieParts = [];
-
-        if (baseHeaders.Cookie) cookieParts.push(baseHeaders.Cookie);
-        if (bypassCookie) {
-            cookieParts.push(`t_hash_t=${bypassCookie}`, `t_hash=${bypassCookie}`, 'ott=nf');
-        }
-
+        const baseHeaders = await getNetflixMirrorProxyHeaders();
         const headers = {
             ...baseHeaders,
-            Cookie: cookieParts.filter(Boolean).join('; '),
             'Accept-Encoding': 'identity'
         };
 
