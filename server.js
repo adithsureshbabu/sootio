@@ -755,6 +755,10 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
         decodedUrl.includes('viewcrate.cc') ||
         decodedUrl.includes('filecrypt.cc') ||
         decodedUrl.includes('filecrypt.co');
+    const isProviderArchiveResolveUrl = decodedUrl.includes('modpro.blog') ||
+        decodedUrl.includes('leechpro.blog') ||
+        decodedUrl.includes('episodes.animeflix.') ||
+        decodedUrl.includes('/getlink/');
 
     // Use hash of URL as cache key
     const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
@@ -805,9 +809,12 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             const baseTimeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10);
             const uhdTimeoutMs = parseInt(process.env.UHDMOVIES_RESOLVE_TIMEOUT || '25000', 10);
             const mkvDramaTimeoutMs = parseInt(process.env.MKVDRAMA_HTTP_RESOLVE_TIMEOUT || '30000', 10);
+            const providerArchiveTimeoutMs = parseInt(process.env.PROVIDER_ARCHIVE_HTTP_RESOLVE_TIMEOUT || '30000', 10);
             const timeoutMs = isUHDMoviesUrl
                 ? Math.max(baseTimeoutMs, uhdTimeoutMs)
-                : (isMkvDramaResolveUrl ? Math.max(baseTimeoutMs, mkvDramaTimeoutMs) : baseTimeoutMs);
+                : ((isMkvDramaResolveUrl || isProviderArchiveResolveUrl)
+                    ? Math.max(baseTimeoutMs, isProviderArchiveResolveUrl ? providerArchiveTimeoutMs : mkvDramaTimeoutMs)
+                    : baseTimeoutMs);
             const timedResolve = Promise.race([
                 resolvePromise,
                 new Promise((_, reject) =>
@@ -891,6 +898,41 @@ async function proxyNetflixMirrorStream(decodedUrl, req, res) {
             Cookie: cookieParts.filter(Boolean).join('; '),
             'Accept-Encoding': 'identity'
         };
+
+        // Preserve the upstream HLS referer chain for nested playlist/segment requests.
+        // The player hits our local /resolve/httpstreaming proxy URLs, so decode that referer
+        // back to the original upstream playlist URL and forward it to NetflixMirror/CDN.
+        const requestReferer = req.get('referer') || req.headers.referer || '';
+        if (requestReferer) {
+            try {
+                const refererUrl = new URL(requestReferer, `${req.protocol}://${req.get('host')}`);
+                const marker = '/resolve/httpstreaming/';
+                const markerIndex = refererUrl.pathname.indexOf(marker);
+                if (markerIndex !== -1) {
+                    let encodedRefererTarget = refererUrl.pathname.slice(markerIndex + marker.length);
+                    encodedRefererTarget = stripNetflixMirrorSegmentSuffix(encodedRefererTarget);
+                    const upstreamReferer = decodeURIComponent(encodedRefererTarget);
+                    if (upstreamReferer.startsWith('http')) {
+                        headers.Referer = upstreamReferer;
+                        try {
+                            headers.Origin = new URL(upstreamReferer).origin;
+                        } catch {
+                            // Ignore malformed referer-derived origin
+                        }
+                    }
+                }
+            } catch {
+                // Keep default NetflixMirror headers if local referer cannot be parsed
+            }
+        }
+
+        if (!headers.Origin) {
+            try {
+                headers.Origin = new URL(targetUrl).origin;
+            } catch {
+                // Ignore invalid target origin
+            }
+        }
 
         if (req.headers.range) {
             headers.Range = req.headers.range;
