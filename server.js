@@ -93,6 +93,33 @@ const BLOCK_THRESHOLD = 20; // Increased threshold to reduce false positives (wa
 const UNBLOCK_AFTER = 5 * 60 * 1000; // Reduced to 5 minutes (was 10 minutes) to reduce IP blocking duration
 const REQUEST_WINDOW = 5 * 60 * 1000; // 5 minutes for pattern analysis
 const FAST_REQUEST_THRESHOLD = 1000; // 1 second - for detecting rapid requests
+const SUSPICIOUS_IPS_MAX_SIZE = 10000; // Prevent unbounded growth of IP tracking map
+
+// Periodic cleanup of stale IP tracking entries to prevent memory leak / CPU waste
+setInterval(() => {
+    const now = Date.now();
+    let cleaned = 0;
+    for (const [ip, record] of suspiciousIPs.entries()) {
+        // Remove entries that haven't been seen in the request window and aren't blocked
+        if (!record.isBlocked && (now - record.lastRequestTime > REQUEST_WINDOW)) {
+            suspiciousIPs.delete(ip);
+            cleaned++;
+        }
+    }
+    // Emergency eviction if still too large
+    if (suspiciousIPs.size > SUSPICIOUS_IPS_MAX_SIZE) {
+        const excess = suspiciousIPs.size - SUSPICIOUS_IPS_MAX_SIZE;
+        const keys = suspiciousIPs.keys();
+        for (let i = 0; i < excess; i++) {
+            const key = keys.next().value;
+            if (key) suspiciousIPs.delete(key);
+        }
+        cleaned += excess;
+    }
+    if (cleaned > 0) {
+        console.log(`[BOT-DETECTION] Cleaned ${cleaned} stale IP entries (remaining: ${suspiciousIPs.size})`);
+    }
+}, 60000); // Every 60 seconds
 
 // Bot detection middleware with pattern analysis
 function botDetectionMiddleware(req, res, next) {
@@ -141,10 +168,14 @@ function botDetectionMiddleware(req, res, next) {
         method: req.method
     });
 
-    // Clean old requests from history (older than 5 minutes)
+    // Clean old requests from history (older than 5 minutes) and cap array size
     ipRecord.requestHistory = ipRecord.requestHistory.filter(
         req => currentTime - req.time < REQUEST_WINDOW
     );
+    // Hard cap to prevent runaway memory/CPU in request history scanning
+    if (ipRecord.requestHistory.length > 200) {
+        ipRecord.requestHistory = ipRecord.requestHistory.slice(-200);
+    }
 
     // Check for high frequency requests - made more lenient
     const recentRequests = ipRecord.requestHistory.filter(
@@ -479,6 +510,40 @@ app.set('etag', false); // Disable etag generation for static performance
 
 app.use(cors());
 
+// Event loop overload protection - prevents death spiral under heavy load
+// Monitors event loop lag and returns 503 when the server is overwhelmed
+const OVERLOAD_LAG_THRESHOLD_MS = parseInt(process.env.OVERLOAD_LAG_THRESHOLD || '2000', 10);
+const OVERLOAD_CHECK_INTERVAL_MS = 500;
+let eventLoopLag = 0;
+let overloadCheckTimer = null;
+
+function startOverloadMonitor() {
+    let lastCheck = process.hrtime.bigint();
+    overloadCheckTimer = setInterval(() => {
+        const now = process.hrtime.bigint();
+        const elapsed = Number(now - lastCheck) / 1e6; // ms
+        eventLoopLag = Math.max(0, elapsed - OVERLOAD_CHECK_INTERVAL_MS);
+        lastCheck = now;
+    }, OVERLOAD_CHECK_INTERVAL_MS);
+    if (overloadCheckTimer.unref) overloadCheckTimer.unref();
+}
+startOverloadMonitor();
+
+const OVERLOAD_SKIP_PREFIXES = ['/configure', '/manifest.json', '/manifest-no-catalogs.json'];
+
+app.use((req, res, next) => {
+    if (eventLoopLag > OVERLOAD_LAG_THRESHOLD_MS) {
+        // Allow lightweight endpoints through even under load
+        if (req.path === '/' || OVERLOAD_SKIP_PREFIXES.some(p => req.path === p || req.path.startsWith(p))) {
+            return next();
+        }
+        console.error(`[OVERLOAD] Rejecting request (lag: ${Math.round(eventLoopLag)}ms): ${req.method} ${req.path.substring(0, 80)}`);
+        res.status(503).json({ streams: [], err: 'Server overloaded, please retry shortly' });
+        return;
+    }
+    next();
+});
+
 // Anti-bot detection middleware
 app.use(botDetectionMiddleware);
 
@@ -496,11 +561,15 @@ app.use(compression({
     }
 }));
 
-// Swagger stats middleware (unchanged)
-app.use(swStats.getMiddleware({
-    name: addonInterface.manifest.name,
-    version: addonInterface.manifest.version,
-}));
+// Swagger stats middleware - disabled by default to save CPU under load
+// Set SWAGGER_STATS_ENABLED=true in .env to re-enable
+if (process.env.SWAGGER_STATS_ENABLED === 'true') {
+    app.use(swStats.getMiddleware({
+        name: addonInterface.manifest.name,
+        version: addonInterface.manifest.version,
+    }));
+    console.log('[SERVER] swagger-stats enabled');
+}
 
 // Global rate limiter - more permissive limits
 const globalRateLimiter = rateLimit({

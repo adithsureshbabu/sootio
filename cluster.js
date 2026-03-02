@@ -25,12 +25,12 @@ const totalMemoryGB = os.totalmem() / (1024 ** 3);
 // Formula: base on CPU count with I/O multiplier, constrained by memory (each worker ~150-300MB)
 const memoryPerWorkerGB = 0.25; // Conservative estimate per worker
 const maxWorkersByMemory = Math.floor(totalMemoryGB / memoryPerWorkerGB * 0.7); // Use 70% of memory max
-const ioMultiplier = parseFloat(process.env.WORKER_IO_MULTIPLIER) || 2; // I/O bound apps benefit from 2-4x CPUs
+const ioMultiplier = parseFloat(process.env.WORKER_IO_MULTIPLIER) || 1; // Default 1x CPUs (was 2x but caused excessive overhead with per-worker intervals/pools)
 const calculatedWorkers = Math.ceil(numCPUs * ioMultiplier);
 
 // Environment overrides for fine-tuning
 const envMaxWorkers = parseInt(process.env.MAX_WORKERS, 10) || 128;
-const envMinWorkers = parseInt(process.env.MIN_WORKERS, 10) || numCPUs;
+const envMinWorkers = parseInt(process.env.MIN_WORKERS, 10) || Math.min(numCPUs, 4); // Default min 4 workers (was numCPUs which could be very high)
 
 // Final worker count: balance CPU multiplier, memory limits, and env config
 const workersToUse = Math.max(

@@ -36,7 +36,7 @@ RUN npm install -g pnpm@9 && pnpm install --no-frozen-lockfile
 COPY . .
 
 # Expose app port (keep whatever your app actually listens on)
-EXPOSE 6907
+EXPOSE 55771
 
 # Start the dev / app server
 CMD ["npm", "run", "start"]
