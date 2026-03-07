@@ -388,6 +388,21 @@ async function getCacheValue(cacheKey) {
     return null;
 }
 
+function normalizeClientIp(rawIp) {
+    if (!rawIp) return '';
+    const ip = String(rawIp).trim();
+    if (!ip) return '';
+    return ip.split(',')[0].trim();
+}
+
+function buildResolverScopeKey(debridProvider, debridApiKey, decodedUrl, clientIp) {
+    const urlHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
+    const tokenHash = crypto.createHash('sha256').update(String(debridApiKey || '')).digest('hex').slice(0, 16);
+    const normalizedIp = normalizeClientIp(clientIp) || 'no-ip';
+    const ipHash = crypto.createHash('sha256').update(normalizedIp).digest('hex').slice(0, 16);
+    return `${debridProvider}:${urlHash}:${tokenHash}:${ipHash}`;
+}
+
 const app = express();
 
 // Cache client IP on the request once to avoid repeated lookups in downstream middleware
@@ -677,7 +692,7 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
     }
 
     const decodedUrl = decodeURIComponent(url);
-    const clientIp = req.clientIp || requestIp.getClientIp(req);
+    const clientIp = normalizeClientIp(req.clientIp || requestIp.getClientIp(req));
     req.clientIp = clientIp;
 
     // Extract config from query if provided (for NZB resolution)
@@ -706,9 +721,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
         config.cacheHash = cacheHash;
     }
 
-    // Use provider + hash of URL as cache key to avoid storing decoded URLs with API keys
-    const cacheKeyHash = crypto.createHash('md5').update(decodedUrl).digest('hex');
-    const resolverCacheKey = `${debridProvider}:${cacheKeyHash}`;
+    // Scope resolver cache/in-flight dedupe by provider + URL + requester token + requester IP.
+    // This prevents cross-user token/IP reuse when two users resolve the same source URL.
+    const resolverCacheKey = buildResolverScopeKey(debridProvider, debridApiKey, decodedUrl, clientIp);
 
     try {
         let finalUrl;
@@ -721,9 +736,9 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
             } else {
                 finalUrl = cachedValue;
             }
-            console.log(`[CACHE] Using cached URL for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
+            console.log(`[CACHE] Using cached URL for key: ${resolverCacheKey.substring(0, 16)}...`);
         } else if (PENDING_RESOLVES.has(resolverCacheKey)) {
-            console.log(`[RESOLVER] Joining in-flight resolve for key: ${debridProvider}:${cacheKeyHash.substring(0, 8)}...`);
+            console.log(`[RESOLVER] Joining in-flight resolve for key: ${resolverCacheKey.substring(0, 16)}...`);
             finalUrl = await PENDING_RESOLVES.get(resolverCacheKey);
             // Handle case where finalUrl might be an object from UHDMovies resolver
             if (finalUrl && typeof finalUrl === 'object' && finalUrl.url) {
