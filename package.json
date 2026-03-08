@@ -4,9 +4,9 @@
 	"description": "Stremio Addon to search downloads and torrents in debrid services",
 	"main": "server.js",
 	"scripts": {
-		"start": "LOG_LEVEL=error node --max-old-space-size=2048 --expose-gc cluster.js",
+		"start": "node --max-old-space-size=2048 --expose-gc cluster.js",
 		"start:dev": "LOG_LEVEL=debug node --max-old-space-size=2048 --expose-gc cluster.js",
-		"standalone": "LOG_LEVEL=error node --max-old-space-size=12000 --expose-gc server.js",
+		"standalone": "node --max-old-space-size=12000 --expose-gc server.js",
 		"standalone:dev": "LOG_LEVEL=debug node --max-old-space-size=2048 --expose-gc server.js",
 		"dev": "LOG_LEVEL=debug NODE_OPTIONS=\"--max-old-space-size=2048 --expose-gc\" nodemon server.js",
 		"test": "node --max-old-space-size=2048 --expose-gc node_modules/.bin/jest",
