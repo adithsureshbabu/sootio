@@ -309,7 +309,6 @@ MAX_H264_RESULTS_PER_QUALITY=2
 
 # Overall limits
 TARGET_CODEC_COUNT=10
-EARLY_EXIT_QUALITY_THRESHOLD=BluRay
 ```
 
 ### Performance Tuning
