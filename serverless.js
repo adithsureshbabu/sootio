@@ -4,6 +4,7 @@ import rateLimit from "express-rate-limit";
 import requestIp from 'request-ip'
 import addonInterface from "./addon.js"
 import landingTemplate from "./lib/util/landingTemplate.js"
+import donationAdminTemplate from "./lib/util/donationAdminTemplate.js"
 import StreamProvider from './lib/stream-provider.js'
 import { decode } from 'urlencode'
 import qs from 'querystring'
@@ -11,6 +12,7 @@ import { getManifest } from './lib/util/manifest.js'
 import { parseConfiguration } from './lib/util/configuration.js'
 import { BadTokenError, BadRequestError, AccessDeniedError } from './lib/util/error-codes.js'
 import RealDebrid from './lib/real-debrid.js'
+import { addDonationRecord, deleteDonationRecord, getDonationAdminStatus, getDonationStatus, processPayPalIpn, updateDonationRecord } from './lib/util/donationTracker.js'
 
 const router = new Router();
 const limiter = rateLimit({
@@ -22,9 +24,241 @@ const limiter = rateLimit({
 
 router.use(cors())
 
+function readRequestBody(req) {
+    return new Promise((resolve, reject) => {
+        let body = ''
+
+        req.on('data', (chunk) => {
+            body += chunk
+            if (body.length > 1024 * 256) {
+                reject(new Error('Request body too large'))
+                req.destroy()
+            }
+        })
+
+        req.on('end', () => resolve(body))
+        req.on('error', reject)
+    })
+}
+
+function parseServerlessRequestUrl(req) {
+    try {
+        const host = req.headers?.host || 'localhost'
+        return new URL(req.url || '/', `http://${host}`)
+    } catch (_) {
+        return new URL('http://localhost/')
+    }
+}
+
+function getDonationsAdminToken() {
+    return String(process.env.DONATIONS_ADMIN_TOKEN || '').trim()
+}
+
+function getServerlessRequestAdminToken(req, parsedBody = null) {
+    const authHeader = String(req.headers?.authorization || '')
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+        return authHeader.slice(7).trim()
+    }
+
+    const headerToken = String(req.headers?.['x-donations-admin-token'] || '').trim()
+    if (headerToken) return headerToken
+
+    const url = parseServerlessRequestUrl(req)
+    const queryToken = (url.searchParams.get('token') || '').trim()
+    if (queryToken) return queryToken
+
+    const bodyToken = String(parsedBody?.token || '').trim()
+    if (bodyToken) return bodyToken
+
+    return ''
+}
+
+function sendJson(res, statusCode, payload) {
+    res.statusCode = statusCode
+    res.setHeader('content-type', 'application/json; charset=utf-8')
+    res.end(JSON.stringify(payload))
+}
+
+function ensureServerlessDonationsAdminAuthorized(req, res, parsedBody = null) {
+    const configuredToken = getDonationsAdminToken()
+    if (!configuredToken) {
+        sendJson(res, 503, { err: 'DONATIONS_ADMIN_TOKEN is not configured' })
+        return false
+    }
+
+    const requestToken = getServerlessRequestAdminToken(req, parsedBody)
+    if (!requestToken || requestToken !== configuredToken) {
+        sendJson(res, 401, { err: 'Unauthorized' })
+        return false
+    }
+
+    return true
+}
+
+async function parseServerlessBody(req) {
+    const rawBody = await readRequestBody(req)
+    const contentType = String(req.headers?.['content-type'] || '').toLowerCase()
+
+    if (contentType.includes('application/json')) {
+        try {
+            return JSON.parse(rawBody || '{}')
+        } catch (_) {
+            return {}
+        }
+    }
+
+    return qs.parse(rawBody)
+}
+
 router.get('/', (_, res) => {
     res.redirect('/configure')
     res.end();
+})
+
+router.get('/donations/admin', (req, res) => {
+    const configuredToken = getDonationsAdminToken()
+    if (!configuredToken) {
+        res.statusCode = 503
+        res.end('DONATIONS_ADMIN_TOKEN is not configured. Set it in .env and restart.')
+        return
+    }
+
+    const requestToken = getServerlessRequestAdminToken(req)
+    if (!requestToken || requestToken !== configuredToken) {
+        res.statusCode = 401
+        res.end('Unauthorized. Open /donations/admin?token=YOUR_TOKEN')
+        return
+    }
+
+    res.setHeader('cache-control', 'no-store')
+    res.setHeader('content-type', 'text/html; charset=utf-8')
+    res.end(donationAdminTemplate())
+})
+
+router.get('/donations/status.json', async (_, res) => {
+    try {
+        const status = await getDonationStatus()
+        sendJson(res, 200, status)
+    } catch (error) {
+        console.error('[DONATIONS] Failed to serve donation status:', error.message)
+        sendJson(res, 500, { err: 'Donation status unavailable' })
+    }
+})
+
+router.get('/donations/admin/status.json', async (req, res) => {
+    if (!ensureServerlessDonationsAdminAuthorized(req, res)) {
+        return
+    }
+
+    try {
+        const url = parseServerlessRequestUrl(req)
+        const month = url.searchParams.get('month') || null
+        const status = await getDonationAdminStatus(month)
+        res.setHeader('cache-control', 'no-store')
+        sendJson(res, 200, status)
+    } catch (error) {
+        console.error('[DONATIONS] Failed to serve admin donation status:', error.message)
+        sendJson(res, 500, { err: 'Admin donation status unavailable' })
+    }
+})
+
+router.post('/donations/admin/add', async (req, res) => {
+    try {
+        const body = await parseServerlessBody(req)
+        if (!ensureServerlessDonationsAdminAuthorized(req, res, body)) {
+            return
+        }
+
+        const result = await addDonationRecord({
+            amountUsd: body.amountUsd,
+            firstName: body.firstName,
+            txnId: body.txnId || null,
+            source: body.source || 'manual-paypal-check',
+            createdAt: body.createdAt || new Date().toISOString(),
+            monthKey: body.monthKey || null,
+            note: body.note || null
+        })
+
+        if (!result?.updated) {
+            sendJson(res, 400, { ok: false, reason: result?.reason || 'not_updated' })
+            return
+        }
+
+        sendJson(res, 200, { ok: true, status: result.status, adminStatus: result.adminStatus })
+    } catch (error) {
+        console.error('[DONATIONS] Failed to add manual donation:', error.message)
+        sendJson(res, 500, { ok: false, err: 'Failed to add donation' })
+    }
+})
+
+router.post('/donations/admin/edit', async (req, res) => {
+    try {
+        const body = await parseServerlessBody(req)
+        if (!ensureServerlessDonationsAdminAuthorized(req, res, body)) {
+            return
+        }
+
+        const result = await updateDonationRecord({
+            donationId: body.donationId,
+            monthKey: body.monthKey || null,
+            amountUsd: body.amountUsd,
+            firstName: body.firstName,
+            txnId: body.txnId || null,
+            source: body.source || 'manual-paypal-check',
+            createdAt: body.createdAt ?? null,
+            note: body.note || null
+        })
+
+        if (!result?.updated) {
+            sendJson(res, 400, { ok: false, reason: result?.reason || 'not_updated' })
+            return
+        }
+
+        sendJson(res, 200, { ok: true, status: result.status, adminStatus: result.adminStatus })
+    } catch (error) {
+        console.error('[DONATIONS] Failed to edit donation:', error.message)
+        sendJson(res, 500, { ok: false, err: 'Failed to edit donation' })
+    }
+})
+
+router.post('/donations/admin/delete', async (req, res) => {
+    try {
+        const body = await parseServerlessBody(req)
+        if (!ensureServerlessDonationsAdminAuthorized(req, res, body)) {
+            return
+        }
+
+        const result = await deleteDonationRecord({
+            donationId: body.donationId,
+            monthKey: body.monthKey || null
+        })
+
+        if (!result?.updated) {
+            sendJson(res, 400, { ok: false, reason: result?.reason || 'not_updated' })
+            return
+        }
+
+        sendJson(res, 200, { ok: true, status: result.status, adminStatus: result.adminStatus })
+    } catch (error) {
+        console.error('[DONATIONS] Failed to delete donation:', error.message)
+        sendJson(res, 500, { ok: false, err: 'Failed to delete donation' })
+    }
+})
+
+router.post('/paypal/ipn', async (req, res) => {
+    try {
+        const payload = await parseServerlessBody(req)
+        const result = await processPayPalIpn(payload)
+        if (result?.updated) {
+            console.log(`[DONATIONS] PayPal IPN recorded (${payload?.txn_id || 'no-txn-id'})`)
+        }
+        res.statusCode = 200
+        res.end('OK')
+    } catch (error) {
+        console.error('[DONATIONS] PayPal IPN processing failed:', error.message)
+        res.statusCode = 500
+        res.end('IPN processing failed')
+    }
 })
 
 router.get('/:configuration?/configure', (req, res) => {
