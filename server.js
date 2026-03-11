@@ -33,6 +33,8 @@ import crypto from 'crypto';
 import { obfuscateSensitive } from './lib/common/torrent-utils.js';
 import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
+import donationAdminTemplate from './lib/util/donationAdminTemplate.js';
+import { addDonationRecord, deleteDonationRecord, getDonationAdminStatus, getDonationStatus, processPayPalIpn, updateDonationRecord } from './lib/util/donationTracker.js';
 import fetch from 'node-fetch';
 import { rewriteNetflixMirrorPlaylist, detectNetflixMirrorPayloadType, stripNetflixMirrorSegmentSuffix } from './lib/http-streams/providers/netflixmirror/proxy.js';
 import { getNetflixMirrorProxyHeaders } from './lib/http-streams/providers/netflixmirror/search.js';
@@ -485,6 +487,179 @@ app.get('/configure', (req, res) => {
 app.get('/manifest-no-catalogs.json', (req, res) => {
     const manifest = getManifest({}, true);
     res.json(manifest);
+});
+
+function getDonationsAdminToken() {
+    return String(process.env.DONATIONS_ADMIN_TOKEN || '').trim();
+}
+
+function getExpressRequestAdminToken(req) {
+    const authHeader = String(req.get('authorization') || '');
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+        return authHeader.slice(7).trim();
+    }
+
+    const headerToken = String(req.get('x-donations-admin-token') || '').trim();
+    if (headerToken) return headerToken;
+
+    const queryToken = String(req.query?.token || '').trim();
+    if (queryToken) return queryToken;
+
+    const bodyToken = String(req.body?.token || '').trim();
+    if (bodyToken) return bodyToken;
+
+    return '';
+}
+
+function ensureDonationsAdminAuthorized(req, res) {
+    const configuredToken = getDonationsAdminToken();
+    if (!configuredToken) {
+        res.status(503).json({ err: 'DONATIONS_ADMIN_TOKEN is not configured' });
+        return false;
+    }
+
+    const requestToken = getExpressRequestAdminToken(req);
+    if (!requestToken || requestToken !== configuredToken) {
+        res.status(401).json({ err: 'Unauthorized' });
+        return false;
+    }
+
+    return true;
+}
+
+app.get('/donations/admin', (req, res) => {
+    const configuredToken = getDonationsAdminToken();
+    if (!configuredToken) {
+        return res.status(503).send('DONATIONS_ADMIN_TOKEN is not configured. Set it in .env and restart.');
+    }
+
+    const requestToken = getExpressRequestAdminToken(req);
+    if (!requestToken || requestToken !== configuredToken) {
+        return res.status(401).send('Unauthorized. Open /donations/admin?token=YOUR_TOKEN');
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(donationAdminTemplate());
+});
+
+app.get('/donations/status.json', async (req, res) => {
+    try {
+        const status = await getDonationStatus();
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.json(status);
+    } catch (error) {
+        console.error('[DONATIONS] Failed to serve donation status:', error.message);
+        res.status(500).json({ err: 'Donation status unavailable' });
+    }
+});
+
+app.get('/donations/admin/status.json', async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const status = await getDonationAdminStatus(req.query?.month);
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(status);
+    } catch (error) {
+        console.error('[DONATIONS] Failed to serve admin donation status:', error.message);
+        res.status(500).json({ err: 'Admin donation status unavailable' });
+    }
+});
+
+app.post('/donations/admin/add', express.json(), express.urlencoded({ extended: false }), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const payload = req.body || {};
+        const result = await addDonationRecord({
+            amountUsd: payload.amountUsd,
+            firstName: payload.firstName,
+            txnId: payload.txnId || null,
+            source: payload.source || 'manual-paypal-check',
+            createdAt: payload.createdAt || new Date().toISOString(),
+            monthKey: payload.monthKey || null,
+            note: payload.note || null
+        });
+
+        if (!result?.updated) {
+            return res.status(400).json({ ok: false, reason: result?.reason || 'not_updated' });
+        }
+
+        res.json({ ok: true, status: result.status, adminStatus: result.adminStatus });
+    } catch (error) {
+        console.error('[DONATIONS] Failed to add manual donation:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to add donation' });
+    }
+});
+
+app.post('/donations/admin/edit', express.json(), express.urlencoded({ extended: false }), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const payload = req.body || {};
+        const result = await updateDonationRecord({
+            donationId: payload.donationId,
+            monthKey: payload.monthKey || null,
+            amountUsd: payload.amountUsd,
+            firstName: payload.firstName,
+            txnId: payload.txnId || null,
+            source: payload.source || 'manual-paypal-check',
+            createdAt: payload.createdAt ?? null,
+            note: payload.note || null
+        });
+
+        if (!result?.updated) {
+            return res.status(400).json({ ok: false, reason: result?.reason || 'not_updated' });
+        }
+
+        res.json({ ok: true, status: result.status, adminStatus: result.adminStatus });
+    } catch (error) {
+        console.error('[DONATIONS] Failed to edit donation:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to edit donation' });
+    }
+});
+
+app.post('/donations/admin/delete', express.json(), express.urlencoded({ extended: false }), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const payload = req.body || {};
+        const result = await deleteDonationRecord({
+            donationId: payload.donationId,
+            monthKey: payload.monthKey || null
+        });
+
+        if (!result?.updated) {
+            return res.status(400).json({ ok: false, reason: result?.reason || 'not_updated' });
+        }
+
+        res.json({ ok: true, status: result.status, adminStatus: result.adminStatus });
+    } catch (error) {
+        console.error('[DONATIONS] Failed to delete donation:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to delete donation' });
+    }
+});
+
+app.post('/paypal/ipn', express.urlencoded({ extended: false }), async (req, res) => {
+    try {
+        const result = await processPayPalIpn(req.body || {});
+        if (result?.updated) {
+            console.log(`[DONATIONS] PayPal IPN recorded (${req.body?.txn_id || 'no-txn-id'})`);
+        }
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error('[DONATIONS] PayPal IPN processing failed:', error.message);
+        res.status(500).send('IPN processing failed');
+    }
 });
 
 // Track active Usenet streams: nzoId -> { lastAccess, streamCount, config, videoFilePath, usenetConfig }
