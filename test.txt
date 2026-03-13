@@ -1,0 +1,17 @@
+ ▐▛███▜▌   Claude Code v2.1.72
+▝▜█████▛▘  Opus 4.6 · Claude Pro
+  ▘▘ ▝▝    ~/sootio-stremio-addon
+
+✻ Conversation compacted (ctrl+o for history)
+
+  ⎿  Read test-mkv-resolve.js (26 lines)
+  ⎿  Read test-mkv-fetchpage.js (25 lines)
+  ⎿  Referenced file lib/http-streams/providers/mkvdrama/search.js
+  ⎿  Read test-mkv-decrypt.js (149 lines)
+  ⎿  Read test-mkv-fastapi.js (154 lines)
+
+● Searched for 1 pattern (ctrl+o to expand)
+  ⎿  You're out of extra usage · resets 1am (UTC)
+     /upgrade or /extra-usage to finish what you’re working on.
+
+✻ Crunched for 14m 38s

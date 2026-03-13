@@ -1,0 +1,229 @@
+ ▐▛███▜▌   Claude Code v2.1.74
+▝▜█████▛▘  Opus 4.6 · Claude Pro
+  ▘▘ ▝▝    ~/sootio-stremio-addon
+
+✻ Conversation compacted (ctrl+o for history)
+
+  ⎿  Referenced file lib/http-streams/resolvers/http-resolver.js
+  ⎿  Referenced file lib/http-streams/providers/mkvdrama/search.js
+  ⎿  Referenced file lib/http-streams/providers/mkvdrama/streams.js
+  ⎿  Read lib/http-streams/providers/xdmovies/protector.js (303 lines)
+  ⎿  Referenced file lib/http-streams/providers/xdmovies/streams.js
+  ⎿  Plan file referenced (~/.claude/plans/sorted-imagining-star.md)
+
+● Let me start implementing fixes. First, let me check the current MoviesDrive
+  domains.json and probe MKVDrama's API endpoints in parallel.
+
+● Fetch(https://raw.githubusercontent.com/phisher98/TVVVV/main/domains.json)
+  ⎿  Received 1.1KB (200 OK)
+
+● Bash(curl -s -o /dev/null -w "%{http_code}" --max-time 10
+      "https://mkvdrama.net/search?query=test" -H "Accept: application/json"
+      2>/dev/null; echo "")
+  ⎿  403
+
+● Bash(curl -s --max-time 10 "https://mkvdrama.net/yesterday-2026" -H "Accept:
+      application/json" 2>/dev/null | head -c 500)
+  ⎿  <!DOCTYPE html><html lang="en-US"><head><title>Just a moment...</title
+     ><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><m
+     eta http-equiv="X-UA-Compatible" content="IE=Edge"><meta name="robots"
+     … +5 lines (ctrl+o to expand)
+
+● MKVDrama returns Cloudflare challenge for direct access and 403 for search.
+  Let me fetch the domains.json directly and test MKVDrama via FlareSolverr.
+
+● Bash(curl -s --max-time 10
+      "https://raw.githubusercontent.com/phisher98/TVVVV/main/domains.json"
+      2>/dev/null)
+  ⎿  {
+       "moviesdrive": "https://new1.moviesdrive.surf",
+       "HDHUB4u": "https://new4.hdhub4u.fo",
+     … +18 lines (ctrl+o to expand)
+
+● Bash(curl -s --max-time 15 -X POST "http://100.104.177.44:8191/v1" -H
+      "Content-Type: application/json" -d
+      '{"cmd":"request.get","url":"https://mkvdrama.net/search?qu…)
+  ⎿  Status: 200
+     <html lang="en" style="--theme-color: #e74c3c;"><head>
+       <meta charset="utf-8">
+     … +15 lines (ctrl+o to expand)
+
+● Good findings. The MoviesDrive domain is still new1.moviesdrive.surf in
+  domains.json. Let me check if it resolves now and check the MKVDrama search
+  results more thoroughly.
+
+● Bash(dig +short new1.moviesdrive.surf 2>/dev/null; echo "---"; curl -s -o
+      /dev/null -w "%{http_code}" --max-time 10 "https://new1.moviesdrive.surf"
+      2>/dev/null; echo…)
+  ⎿  ---
+     000
+
+● Bash(curl -s --max-time 15 -X POST "http://100.104.177.44:8191/v1" -H
+      "Content-Type: application/json" -d
+      '{"cmd":"request.get","url":"https://mkvdrama.net/search?qu…)
+  ⎿  Links found: 20
+     href="https://mkvdrama.net/search"
+     href="/static/assets/favicon/favicon.ico"
+     … +16 lines (ctrl+o to expand)
+
+● MoviesDrive domain is completely dead (DNS failure, HTTP 000). MKVDrama search
+   page is client-rendered (no server-side results). Let me dig deeper into
+  MKVDrama's client-side API and check if there are alternative MoviesDrive
+  domains.
+
+● Bash(curl -s --max-time 15 -X POST "http://100.104.177.44:8191/v1" -H
+      "Content-Type: application/json" -d
+      '{"cmd":"request.get","url":"https://mkvdrama.net/search?qu…)
+  ⎿  Interrupted · What should Claude do instead?
+
+● Bash(# Try alternative MoviesDrive domains by searching for recent domain
+      changes
+      for domain in "moviesdrive.cloud" "moviesdrive.one" "moviesdrive.lat"
+      "moviesdrives…)
+  ⎿  Cancelled: parallel tool call Bash(curl -s --max-time 15 -X POST 
+     "http://10…) errored
+
+● Let me take a different approach. Let me read the key files and implement the
+  fixes directly based on what we already know from the research.
+
+● Read 2 files (ctrl+o to expand)
+
+❯ https://new1.moviesdrives.my/                                                 
+
+● Let me check the user's provided MoviesDrive URL and continue reading MKVDrama
+   search code.
+
+● Bash(dig +short new1.moviesdrives.my 2>/dev/null; echo "---"; curl -s -o
+      /dev/null -w "%{http_code}" --max-time 10 "https://new1.moviesdrives.my/"
+      2>/dev/null; echo…)
+  ⎿  188.114.96.2
+     188.114.97.2
+     ---
+     200
+
+● new1.moviesdrives.my is alive and returns 200. That's already the hardcoded
+  fallback domain in the code. Let me test the search API and content page.
+
+● Bash(curl -s --max-time 10
+      "https://new1.moviesdrives.my/searchapi.php?q=inception&page=1" -H
+      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.…)
+  ⎿  {"facet_counts":[],"found":4,"hits":[{"document":{"category":["2160p 4
+     K","ACTION","Hindi Dubbed","Hollywood","Sifi","TRILLER"],"id":"29369",
+     "imdb_id":"tt1375666","permalink":"/inception-2010/","post_date":"Dece
+     … +26 lines (ctrl+o to expand)
+
+● MoviesDrive search API works and returns results with IMDB IDs. The domain
+  new1.moviesdrives.my is functional. Now let me check what's actually broken in
+   the MoviesDrive resolution chain by testing a content page.
+
+● Bash(curl -s --max-time 10 "https://new1.moviesdrives.my/inception-2010/" -H
+      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+       2>/dev/null |…)
+  ⎿  mdrive links: 6
+     href="https://mdrive.lol/archives/41189"
+     href="https://mdrive.lol/archives/41190"
+     … +18 lines (ctrl+o to expand)
+
+● MoviesDrive works - the domain is alive, search returns results, and content
+  pages have mdrive.lol links. The mdrive TLD changed from the previous regex
+  pattern. Let me check the current code's regex.
+
+● Searched for 1 pattern, read 1 file (ctrl+o to expand)
+
+● The regex /mdrive\.[a-z]+\/archives\//i already handles mdrive.lol/archives/
+  correctly. MoviesDrive seems functional. Let me now test the full chain -
+  follow an mdrive link to see if HubCloud extraction works.
+
+● Bash(curl -s --max-time 10 "https://mdrive.lol/archives/41189" -H "User-Agent:
+       Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" 2>/dev/null
+       | node -e "…)
+  ⎿  Error: Exit code 1
+
+● Bash(curl -s -o /dev/null -w "%{http_code}\n%{redirect_url}" --max-time 10
+      "https://mdrive.lol/archives/41189" -H "User-Agent: Mozilla/5.0 (Windows
+      NT 10.0; Win64; x…)
+  ⎿  200
+
+● Bash(curl -s --max-time 10 "https://mdrive.lol/archives/41189" -H "User-Agent:
+       Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" 2>/dev/null
+       | head -c 30…)
+  ⎿  <!DOCTYPE html>
+     <html lang="en-US">
+     <head>
+     … +40 lines (ctrl+o to expand)
+
+● Bash(curl -s --max-time 10 "https://mdrive.lol/archives/41189" -H "User-Agent:
+       Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" 2>/dev/null
+       | grep -oP '…)
+  ⎿  href="https://mdrive.lol/xmlrpc.php"
+     href="https://mdrive.lol/feed"
+     href="https://mdrive.lol/comments/feed"
+     … +16 lines (ctrl+o to expand)
+
+● There's a hubcloud.foo link. Let me now read the extraction code to see how it
+   handles this, and check the dead domains list.
+
+● Read 1 file (ctrl+o to expand)
+
+● The code looks for hubcloud in URLs and the mdrive page has
+  hubcloud.foo/drive/... - that should match. Let me check the dead hubcloud
+  domains list.
+
+● Searched for 1 pattern (ctrl+o to expand)
+
+● hubcloud.foo is NOT in the dead list - good. Let me now run the addon in
+  standalone mode and test the MoviesDrive provider end-to-end for Inception
+  (tt1375666).
+
+● Bash(node -e "
+      process.env.MOVIESDRIVE_ENABLED = 'true';…)
+  ⎿  Error: File is not defined
+     /home/ubuntu/sootio-stremio-addon/node_modules/undici/lib/web/webidl/i
+     ndex.js:531
+     … +15 lines (ctrl+o to expand)
+
+● Need to polyfill File and use proper ESM imports. Let me write a proper test
+  script.
+
+● Bash(cat > /tmp/test-moviesdrive.mjs << 'EOF'
+      globalThis.File = class File {};…)
+  ⎿  node:internal/errors:496
+         ErrorCaptureStackTrace(err);
+         ^
+     … +19 lines (ctrl+o to expand)
+
+● Bash(cat > /tmp/test-moviesdrive.mjs << 'EOF'
+      globalThis.File = class File {};…)
+  ⎿  node:internal/errors:496
+         ErrorCaptureStackTrace(err);
+         ^
+     … +19 lines (ctrl+o to expand)
+
+● Bash(node -e "
+      globalThis.File = class File {};…)
+  ⎿  Running in the background (↓ to manage)
+  ⎿  (timeout 2m)
+
+● While that runs, let me research MKVDrama's new structure. The FlareSolverr
+  returned HTML for the search page - it's a client-rendered SPA. Let me check
+  what JS files it loads and find the API endpoint.
+
+● Bash(curl -s --max-time 15 -X POST "http://100.104.177.44:8191/v1" -H
+      "Content-Type: application/json" -d
+      '{"cmd":"request.get","url":"https://mkvdrama.net/search?qu…)
+  ⎿  JS scripts:
+     src="/static/js/dist/site.bundle.js?v=f2fca91b2a7f"
+     src="/static/js/flash.js?v=fc92ed520b0c"
+     … +8 lines (ctrl+o to expand)
+  ⎿  You're out of extra usage · resets 9pm (UTC)
+     /upgrade or /extra-usage to finish what you’re working on.
+
+✻ Baked for 14m 0s
+
+● Agent "Research XDMovies site/API" completed
+
+● Agent "Research MoviesDrive domain/API" completed
+
+● Agent "Research MKVDrama site/API" completed
+  ⎿  You're out of extra usage · resets 9pm (UTC)
+     /upgrade or /extra-usage to finish what you’re working on.
