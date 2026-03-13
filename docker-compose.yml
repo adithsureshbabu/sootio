@@ -18,13 +18,13 @@ services:
     environment:
       - NODE_ENV=production
       - LOG_LEVEL=error
-      - MAX_WORKERS=4
+      - MAX_WORKERS=8
       - POSTGRES_POOL_SIZE=10
     deploy:
       resources:
         limits:
-          cpus: '6'
-          memory: 4G
+          cpus: '8'
+          memory: 24G
     restart: always
 
 volumes:

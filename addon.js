@@ -159,7 +159,7 @@ builder.defineStreamHandler(args => {
                         console.log("Response streams: " + obfuscateSensitive(JSON.stringify(streams), keysToObfuscate))
                         resolve({
                             streams,
-                            ...enrichCacheParams(streams && streams.length > 0)
+                            ...enrichCacheParams(streams && streams.length > 0, args.config)
                         })
                     })
                     .catch(err => reject(err))
@@ -174,21 +174,33 @@ builder.defineStreamHandler(args => {
                         console.log("Response streams: " + obfuscateSensitive(JSON.stringify(streams), keysToObfuscate))
                         resolve({
                             streams,
-                            ...enrichCacheParams(streams && streams.length > 0)
+                            ...enrichCacheParams(streams && streams.length > 0, args.config)
                         })
                     })
                     .catch(err => reject(err))
                 break
             default:
-                resolve({ streams: [], ...enrichCacheParams(false) })
+                resolve({ streams: [], ...enrichCacheParams(false, args.config) })
                 break
         }
     })
 })
 
-function enrichCacheParams(hasResults = true) {
+function shouldDisableStreamResponseCache(config = {}) {
+    if (String(config?.DebridProvider || '').toLowerCase() === 'httpstreaming') {
+        return true;
+    }
+
+    if (!Array.isArray(config?.DebridServices)) {
+        return false;
+    }
+
+    return config.DebridServices.some(service => String(service?.provider || '').toLowerCase() === 'httpstreaming');
+}
+
+function enrichCacheParams(hasResults = true, config = {}) {
     // Don't cache empty results - allows Cloudflare to fetch fresh data on next request
-    if (!hasResults) {
+    if (!hasResults || shouldDisableStreamResponseCache(config)) {
         return {
             cacheMaxAge: 0,
             staleRevalidate: 0,

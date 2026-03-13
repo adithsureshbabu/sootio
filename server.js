@@ -94,6 +94,65 @@ async function resolveHttpStreamUrlInSubprocess(url) {
     return null;
 }
 
+const execFileAsync = promisify(execFile);
+
+async function resolveHttpStreamUrlInSubprocess(url) {
+    if (!url) return null;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+            const { stdout, stderr } = await execFileAsync(
+                process.execPath,
+                [
+                    '--input-type=module',
+                    '-e',
+                    "globalThis.File = class File {}; const mod = await import('./lib/http-streams/resolvers/http-resolver.js'); const resolved = await mod.resolveHttpStreamUrl(process.argv[1]); console.log(JSON.stringify({ resolved })); process.exit(0);",
+                    url
+                ],
+                {
+                    cwd: process.cwd(),
+                    env: {
+                        ...process.env,
+                        HTTP_RESOLVE_SUBPROCESS: '1',
+                        DEBRID_HTTP_PROXY: '',
+                        DEBRID_PER_SERVICE_PROXIES: '',
+                        DEBRID_PROXY_SERVICES: '*:false'
+                    },
+                    timeout: 45000,
+                    maxBuffer: 1024 * 1024
+                }
+            );
+
+            const jsonLine = String(stdout || '')
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean)
+                .reverse()
+                .find(line => line.startsWith('{') && line.endsWith('}'));
+            const parsed = JSON.parse(jsonLine || '{}');
+            const resolved = typeof parsed?.resolved === 'string' && parsed.resolved ? parsed.resolved : null;
+            if (resolved) {
+                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve succeeded on attempt ${attempt}`);
+                return resolved;
+            }
+            const stdoutTail = String(stdout || '').split(/\r?\n/).slice(-10).join('\n');
+            const stderrTail = String(stderr || '').split(/\r?\n/).slice(-10).join('\n');
+            console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve returned no URL on attempt ${attempt}. Stdout tail:\n${stdoutTail}`);
+            if (stderrTail) {
+                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama stderr tail:\n${stderrTail}`);
+            }
+        } catch (error) {
+            console.error(`[HTTP-RESOLVER] Subprocess MKVDrama resolve failed on attempt ${attempt}: ${error.message}`);
+        }
+
+        if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    }
+
+    return null;
+}
+
 // Bot detection and anti-scraping utilities
 const BOT_USER_AGENTS = [
     /bot/i,
