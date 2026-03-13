@@ -18,6 +18,8 @@ import https from 'https';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
@@ -34,6 +36,65 @@ import landingTemplate from './lib/util/landingTemplate.js';
 import fetch from 'node-fetch';
 import { rewriteNetflixMirrorPlaylist, detectNetflixMirrorPayloadType, stripNetflixMirrorSegmentSuffix } from './lib/http-streams/providers/netflixmirror/proxy.js';
 import { getNetflixMirrorProxyHeaders } from './lib/http-streams/providers/netflixmirror/search.js';
+
+const execFileAsync = promisify(execFile);
+
+async function resolveHttpStreamUrlInSubprocess(url) {
+    if (!url) return null;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+            const { stdout, stderr } = await execFileAsync(
+                process.execPath,
+                [
+                    '--input-type=module',
+                    '-e',
+                    "globalThis.File = class File {}; const mod = await import('./lib/http-streams/resolvers/http-resolver.js'); const resolved = await mod.resolveHttpStreamUrl(process.argv[1]); console.log(JSON.stringify({ resolved })); process.exit(0);",
+                    url
+                ],
+                {
+                    cwd: process.cwd(),
+                    env: {
+                        ...process.env,
+                        HTTP_RESOLVE_SUBPROCESS: '1',
+                        DEBRID_HTTP_PROXY: '',
+                        DEBRID_PER_SERVICE_PROXIES: '',
+                        DEBRID_PROXY_SERVICES: '*:false'
+                    },
+                    timeout: 45000,
+                    maxBuffer: 1024 * 1024
+                }
+            );
+
+            const jsonLine = String(stdout || '')
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean)
+                .reverse()
+                .find(line => line.startsWith('{') && line.endsWith('}'));
+            const parsed = JSON.parse(jsonLine || '{}');
+            const resolved = typeof parsed?.resolved === 'string' && parsed.resolved ? parsed.resolved : null;
+            if (resolved) {
+                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve succeeded on attempt ${attempt}`);
+                return resolved;
+            }
+            const stdoutTail = String(stdout || '').split(/\r?\n/).slice(-10).join('\n');
+            const stderrTail = String(stderr || '').split(/\r?\n/).slice(-10).join('\n');
+            console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve returned no URL on attempt ${attempt}. Stdout tail:\n${stdoutTail}`);
+            if (stderrTail) {
+                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama stderr tail:\n${stderrTail}`);
+            }
+        } catch (error) {
+            console.error(`[HTTP-RESOLVER] Subprocess MKVDrama resolve failed on attempt ${attempt}: ${error.message}`);
+        }
+
+        if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    }
+
+    return null;
+}
 
 // Bot detection and anti-scraping utilities
 const BOT_USER_AGENTS = [
@@ -883,6 +944,13 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
                 // UHDMovies SID/driveleech URL
                 console.log(`[HTTP-RESOLVER] Detected UHDMovies URL, using UHDMovies resolver`);
                 resolvePromise = resolveUHDMoviesUrl(decodedUrl);
+            } else if (isMkvDramaResolveUrl && (
+                decodedUrl.includes('ouo.io') ||
+                decodedUrl.includes('ouo.press') ||
+                decodedUrl.includes('oii.la')
+            )) {
+                console.log(`[HTTP-RESOLVER] Detected MKVDrama shortlink, using subprocess resolver`);
+                resolvePromise = resolveHttpStreamUrlInSubprocess(decodedUrl);
             } else {
                 // 4KHDHub/other HTTP streaming URLs
                 console.log(`[HTTP-RESOLVER] Detected 4KHDHub URL, using HTTP stream resolver`);
@@ -892,7 +960,7 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             // Set timeout for HTTP stream resolution
             const baseTimeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10);
             const uhdTimeoutMs = parseInt(process.env.UHDMOVIES_RESOLVE_TIMEOUT || '25000', 10);
-            const mkvDramaTimeoutMs = parseInt(process.env.MKVDRAMA_HTTP_RESOLVE_TIMEOUT || '30000', 10);
+            const mkvDramaTimeoutMs = parseInt(process.env.MKVDRAMA_HTTP_RESOLVE_TIMEOUT || '60000', 10);
             const providerArchiveTimeoutMs = parseInt(process.env.PROVIDER_ARCHIVE_HTTP_RESOLVE_TIMEOUT || '30000', 10);
             const timeoutMs = isUHDMoviesUrl
                 ? Math.max(baseTimeoutMs, uhdTimeoutMs)
