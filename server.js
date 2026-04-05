@@ -18,6 +18,8 @@ import https from 'https';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import fs from 'fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import Usenet from './lib/usenet.js';
 import { resolveHttpStreamUrl } from './lib/http-streams.js';
 import { resolveUHDMoviesUrl } from './lib/uhdmovies.js';
@@ -31,9 +33,70 @@ import crypto from 'crypto';
 import { obfuscateSensitive } from './lib/common/torrent-utils.js';
 import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
+import donationAdminTemplate from './lib/util/donationAdminTemplate.js';
+import { addDonationRecord, deleteDonationRecord, getDonationAdminStatus, getDonationSettings, getDonationStatus, processPayPalIpn, updateDonationRecord, updateDonationSettings } from './lib/util/donationTracker.js';
+import { trackImpression, trackClick, getAbTestStats, updateWeights } from './lib/util/abTestTracker.js';
 import fetch from 'node-fetch';
-import { rewriteNetflixMirrorPlaylist, detectNetflixMirrorPayloadType, stripNetflixMirrorSegmentSuffix } from './lib/http-streams/providers/netflixmirror/proxy.js';
-import { getNetflixMirrorProxyHeaders } from './lib/http-streams/providers/netflixmirror/search.js';
+import debridProxyManager from './lib/util/debrid-proxy.js';
+
+const execFileAsync = promisify(execFile);
+
+async function resolveHttpStreamUrlInSubprocess(url) {
+    if (!url) return null;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+        try {
+            const { stdout, stderr } = await execFileAsync(
+                process.execPath,
+                [
+                    '--input-type=module',
+                    '-e',
+                    "globalThis.File = class File {}; const mod = await import('./lib/http-streams/resolvers/http-resolver.js'); const resolved = await mod.resolveHttpStreamUrl(process.argv[1]); console.log(JSON.stringify({ resolved })); process.exit(0);",
+                    url
+                ],
+                {
+                    cwd: process.cwd(),
+                    env: {
+                        ...process.env,
+                        HTTP_RESOLVE_SUBPROCESS: '1',
+                        DEBRID_HTTP_PROXY: '',
+                        DEBRID_PER_SERVICE_PROXIES: '',
+                        DEBRID_PROXY_SERVICES: '*:false'
+                    },
+                    timeout: 45000,
+                    maxBuffer: 1024 * 1024
+                }
+            );
+
+            const jsonLine = String(stdout || '')
+                .split(/\r?\n/)
+                .map(line => line.trim())
+                .filter(Boolean)
+                .reverse()
+                .find(line => line.startsWith('{') && line.endsWith('}'));
+            const parsed = JSON.parse(jsonLine || '{}');
+            const resolved = typeof parsed?.resolved === 'string' && parsed.resolved ? parsed.resolved : null;
+            if (resolved) {
+                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve succeeded on attempt ${attempt}`);
+                return resolved;
+            }
+            const stdoutTail = String(stdout || '').split(/\r?\n/).slice(-10).join('\n');
+            const stderrTail = String(stderr || '').split(/\r?\n/).slice(-10).join('\n');
+            console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve returned no URL on attempt ${attempt}. Stdout tail:\n${stdoutTail}`);
+            if (stderrTail) {
+                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama stderr tail:\n${stderrTail}`);
+            }
+        } catch (error) {
+            console.error(`[HTTP-RESOLVER] Subprocess MKVDrama resolve failed on attempt ${attempt}: ${error.message}`);
+        }
+
+        if (attempt < 2) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+        }
+    }
+
+    return null;
+}
 
 // Bot detection and anti-scraping utilities
 const BOT_USER_AGENTS = [
@@ -416,14 +479,242 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
     res.redirect('/configure');
 });
-app.get('/configure', (req, res) => {
+app.get('/configure', async (req, res) => {
     const manifest = getManifest({}, true);
-    res.send(landingTemplate(manifest, {}));  // Pass an empty config object to avoid undefined error
+    res.send(await landingTemplate(manifest, {}));
 });
 
 app.get('/manifest-no-catalogs.json', (req, res) => {
     const manifest = getManifest({}, true);
     res.json(manifest);
+});
+
+function getDonationsAdminToken() {
+    return String(process.env.DONATIONS_ADMIN_TOKEN || '').trim();
+}
+
+function getExpressRequestAdminToken(req) {
+    const authHeader = String(req.get('authorization') || '');
+    if (authHeader.toLowerCase().startsWith('bearer ')) {
+        return authHeader.slice(7).trim();
+    }
+
+    const headerToken = String(req.get('x-donations-admin-token') || '').trim();
+    if (headerToken) return headerToken;
+
+    const queryToken = String(req.query?.token || '').trim();
+    if (queryToken) return queryToken;
+
+    const bodyToken = String(req.body?.token || '').trim();
+    if (bodyToken) return bodyToken;
+
+    return '';
+}
+
+function ensureDonationsAdminAuthorized(req, res) {
+    const configuredToken = getDonationsAdminToken();
+    if (!configuredToken) {
+        res.status(503).json({ err: 'DONATIONS_ADMIN_TOKEN is not configured' });
+        return false;
+    }
+
+    const requestToken = getExpressRequestAdminToken(req);
+    if (!requestToken || requestToken !== configuredToken) {
+        res.status(401).json({ err: 'Unauthorized' });
+        return false;
+    }
+
+    return true;
+}
+
+app.get('/donations/admin', (req, res) => {
+    const configuredToken = getDonationsAdminToken();
+    if (!configuredToken) {
+        return res.status(503).send('DONATIONS_ADMIN_TOKEN is not configured. Set it in .env and restart.');
+    }
+
+    const requestToken = getExpressRequestAdminToken(req);
+    if (!requestToken || requestToken !== configuredToken) {
+        return res.status(401).send('Unauthorized. Open /donations/admin?token=YOUR_TOKEN');
+    }
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(donationAdminTemplate());
+});
+
+app.get('/donations/status.json', async (req, res) => {
+    try {
+        const status = await getDonationStatus();
+        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        res.json(status);
+    } catch (error) {
+        console.error('[DONATIONS] Failed to serve donation status:', error.message);
+        res.status(500).json({ err: 'Donation status unavailable' });
+    }
+});
+
+app.get('/donations/admin/status.json', async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const status = await getDonationAdminStatus(req.query?.month);
+        res.setHeader('Cache-Control', 'no-store');
+        res.json(status);
+    } catch (error) {
+        console.error('[DONATIONS] Failed to serve admin donation status:', error.message);
+        res.status(500).json({ err: 'Admin donation status unavailable' });
+    }
+});
+
+app.post('/donations/admin/add', express.json(), express.urlencoded({ extended: false }), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const payload = req.body || {};
+        const result = await addDonationRecord({
+            amountUsd: payload.amountUsd,
+            firstName: payload.firstName,
+            txnId: payload.txnId || null,
+            source: payload.source || 'manual-paypal-check',
+            createdAt: payload.createdAt || new Date().toISOString(),
+            monthKey: payload.monthKey || null,
+            note: payload.note || null
+        });
+
+        if (!result?.updated) {
+            return res.status(400).json({ ok: false, reason: result?.reason || 'not_updated' });
+        }
+
+        res.json({ ok: true, status: result.status, adminStatus: result.adminStatus });
+    } catch (error) {
+        console.error('[DONATIONS] Failed to add manual donation:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to add donation' });
+    }
+});
+
+app.post('/donations/admin/edit', express.json(), express.urlencoded({ extended: false }), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const payload = req.body || {};
+        const result = await updateDonationRecord({
+            donationId: payload.donationId,
+            monthKey: payload.monthKey || null,
+            amountUsd: payload.amountUsd,
+            firstName: payload.firstName,
+            txnId: payload.txnId || null,
+            source: payload.source || 'manual-paypal-check',
+            createdAt: payload.createdAt ?? null,
+            note: payload.note || null
+        });
+
+        if (!result?.updated) {
+            return res.status(400).json({ ok: false, reason: result?.reason || 'not_updated' });
+        }
+
+        res.json({ ok: true, status: result.status, adminStatus: result.adminStatus });
+    } catch (error) {
+        console.error('[DONATIONS] Failed to edit donation:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to edit donation' });
+    }
+});
+
+app.post('/donations/admin/delete', express.json(), express.urlencoded({ extended: false }), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) {
+        return;
+    }
+
+    try {
+        const payload = req.body || {};
+        const result = await deleteDonationRecord({
+            donationId: payload.donationId,
+            monthKey: payload.monthKey || null
+        });
+
+        if (!result?.updated) {
+            return res.status(400).json({ ok: false, reason: result?.reason || 'not_updated' });
+        }
+
+        res.json({ ok: true, status: result.status, adminStatus: result.adminStatus });
+    } catch (error) {
+        console.error('[DONATIONS] Failed to delete donation:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to delete donation' });
+    }
+});
+
+app.post('/donations/admin/settings', express.json(), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) return;
+    try {
+        const result = await updateDonationSettings(req.body || {});
+        if (!result?.updated) {
+            return res.status(400).json({ ok: false, reason: result?.reason || 'not_updated' });
+        }
+        res.json({ ok: true, settings: result.settings });
+    } catch (error) {
+        console.error('[DONATIONS] Failed to update settings:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to update settings' });
+    }
+});
+
+app.post('/paypal/ipn', express.urlencoded({ extended: false }), async (req, res) => {
+    try {
+        const result = await processPayPalIpn(req.body || {});
+        if (result?.updated) {
+            console.log(`[DONATIONS] PayPal IPN recorded (${req.body?.txn_id || 'no-txn-id'})`);
+        }
+        res.status(200).send('OK');
+    } catch (error) {
+        console.error('[DONATIONS] PayPal IPN processing failed:', error.message);
+        res.status(500).send('IPN processing failed');
+    }
+});
+
+// --- A/B Test Tracking ---
+
+app.post('/ab/track', express.json(), async (req, res) => {
+    try {
+        const { variant, event } = req.body || {};
+        if (!variant || !event) return res.status(400).json({ ok: false });
+        if (event === 'impression') await trackImpression(variant);
+        else if (event === 'click') await trackClick(variant);
+        res.json({ ok: true });
+    } catch (error) {
+        res.status(500).json({ ok: false });
+    }
+});
+
+app.get('/ab/stats', async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) return;
+    try {
+        const stats = await getAbTestStats();
+        res.json(stats);
+    } catch (error) {
+        console.error('[AB-TEST] Failed to get stats:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to load A/B stats' });
+    }
+});
+
+app.post('/ab/weights', express.json(), async (req, res) => {
+    if (!ensureDonationsAdminAuthorized(req, res)) return;
+    try {
+        const weights = req.body?.weights;
+        if (!weights || typeof weights !== 'object') {
+            return res.status(400).json({ ok: false, err: 'Missing weights object' });
+        }
+        await updateWeights(weights);
+        const stats = await getAbTestStats();
+        res.json({ ok: true, stats });
+    } catch (error) {
+        console.error('[AB-TEST] Failed to update weights:', error.message);
+        res.status(500).json({ ok: false, err: 'Failed to update weights' });
+    }
 });
 
 // Track active Usenet streams: nzoId -> { lastAccess, streamCount, config, videoFilePath, usenetConfig }
@@ -823,9 +1114,6 @@ app.get('/resolve/:debridProvider/:debridApiKey/:url', resolveRateLimiter, async
 app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
     const { url } = req.params;
     const decodedUrl = decodeURIComponent(url);
-    if ((req.query.provider || '').toLowerCase() === 'netflixmirror') {
-        return proxyNetflixMirrorStream(decodedUrl, req, res);
-    }
     const isUHDMoviesUrl = decodedUrl.includes('driveleech') ||
         decodedUrl.includes('driveseed') ||
         decodedUrl.includes('tech.unblockedgames.world') ||
@@ -883,6 +1171,13 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
                 // UHDMovies SID/driveleech URL
                 console.log(`[HTTP-RESOLVER] Detected UHDMovies URL, using UHDMovies resolver`);
                 resolvePromise = resolveUHDMoviesUrl(decodedUrl);
+            } else if (isMkvDramaResolveUrl && (
+                decodedUrl.includes('ouo.io') ||
+                decodedUrl.includes('ouo.press') ||
+                decodedUrl.includes('oii.la')
+            )) {
+                console.log(`[HTTP-RESOLVER] Detected MKVDrama shortlink, using subprocess resolver`);
+                resolvePromise = resolveHttpStreamUrlInSubprocess(decodedUrl);
             } else {
                 // 4KHDHub/other HTTP streaming URLs
                 console.log(`[HTTP-RESOLVER] Detected 4KHDHub URL, using HTTP stream resolver`);
@@ -892,7 +1187,7 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             // Set timeout for HTTP stream resolution
             const baseTimeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10);
             const uhdTimeoutMs = parseInt(process.env.UHDMOVIES_RESOLVE_TIMEOUT || '25000', 10);
-            const mkvDramaTimeoutMs = parseInt(process.env.MKVDRAMA_HTTP_RESOLVE_TIMEOUT || '30000', 10);
+            const mkvDramaTimeoutMs = parseInt(process.env.MKVDRAMA_HTTP_RESOLVE_TIMEOUT || '60000', 10);
             const providerArchiveTimeoutMs = parseInt(process.env.PROVIDER_ARCHIVE_HTTP_RESOLVE_TIMEOUT || '30000', 10);
             const timeoutMs = isUHDMoviesUrl
                 ? Math.max(baseTimeoutMs, uhdTimeoutMs)
@@ -963,159 +1258,6 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
         res.status(500).send("Error resolving HTTP stream.");
     }
 });
-
-async function proxyNetflixMirrorStream(decodedUrl, req, res) {
-    const targetUrl = stripNetflixMirrorSegmentSuffix(decodedUrl);
-
-    try {
-        const baseHeaders = await getNetflixMirrorProxyHeaders();
-        const headers = {
-            ...baseHeaders,
-            'Accept-Encoding': 'identity'
-        };
-
-        // Preserve the upstream HLS referer chain for nested playlist/segment requests.
-        // The player hits our local /resolve/httpstreaming proxy URLs, so decode that referer
-        // back to the original upstream playlist URL and forward it to NetflixMirror/CDN.
-        const requestReferer = req.get('referer') || req.headers.referer || '';
-        if (requestReferer) {
-            try {
-                const refererUrl = new URL(requestReferer, `${req.protocol}://${req.get('host')}`);
-                const marker = '/resolve/httpstreaming/';
-                const markerIndex = refererUrl.pathname.indexOf(marker);
-                if (markerIndex !== -1) {
-                    let encodedRefererTarget = refererUrl.pathname.slice(markerIndex + marker.length);
-                    encodedRefererTarget = stripNetflixMirrorSegmentSuffix(encodedRefererTarget);
-                    const upstreamReferer = decodeURIComponent(encodedRefererTarget);
-                    if (upstreamReferer.startsWith('http')) {
-                        headers.Referer = upstreamReferer;
-                        try {
-                            headers.Origin = new URL(upstreamReferer).origin;
-                        } catch {
-                            // Ignore malformed referer-derived origin
-                        }
-                    }
-                }
-            } catch {
-                // Keep default NetflixMirror headers if local referer cannot be parsed
-            }
-        }
-
-        if (!headers.Origin) {
-            try {
-                headers.Origin = new URL(targetUrl).origin;
-            } catch {
-                // Ignore invalid target origin
-            }
-        }
-
-        if (req.headers.range) {
-            headers.Range = req.headers.range;
-        }
-
-        Object.keys(headers).forEach(key => {
-            if (headers[key] == null || headers[key] === '') {
-                delete headers[key];
-            }
-        });
-
-        const upstream = await fetch(targetUrl, { headers, redirect: 'follow' });
-        const contentType = upstream.headers.get('content-type') || '';
-
-        if (!upstream.ok) {
-            console.error(`[HTTP-RESOLVER] NetflixMirror upstream error ${upstream.status} for ${targetUrl}`);
-            res.status(upstream.status).send('Failed to fetch NetflixMirror resource');
-            return;
-        }
-
-        const isPlaylist = contentType.includes('mpegurl') || targetUrl.toLowerCase().endsWith('.m3u8');
-
-        if (isPlaylist) {
-            const playlistText = await upstream.text();
-            const resolverProto = (req.headers['x-forwarded-proto'] || req.protocol || 'http').split(',')[0].trim();
-            const resolverBase = `${resolverProto}://${req.get('host')}`;
-            if (!playlistText.includes('#EXTM3U')) {
-                console.error(`[HTTP-RESOLVER] NetflixMirror playlist missing #EXTM3U, body starts: ${playlistText.substring(0, 120)}`);
-                res.status(502).send('Invalid playlist from NetflixMirror');
-                return;
-            }
-            const rewritten = rewriteNetflixMirrorPlaylist(playlistText, targetUrl, resolverBase);
-            res.set('Content-Type', 'application/vnd.apple.mpegurl');
-            res.set('Cache-Control', 'no-store');
-            res.send(rewritten);
-            return;
-        }
-
-        const contentLength = upstream.headers.get('content-length');
-        const contentRange = upstream.headers.get('content-range');
-        const acceptRanges = upstream.headers.get('accept-ranges');
-        const reader = upstream.body?.getReader ? upstream.body.getReader() : null;
-
-        if (!reader) {
-            const buffer = Buffer.from(await upstream.arrayBuffer());
-            const finalType = detectNetflixMirrorPayloadType(buffer, contentType || 'application/octet-stream');
-
-            res.status(upstream.status);
-            res.set('Content-Type', finalType || 'application/octet-stream');
-            if (contentLength) res.set('Content-Length', contentLength);
-            if (contentRange) res.set('Content-Range', contentRange);
-            if (acceptRanges) res.set('Accept-Ranges', acceptRanges);
-            res.set('Cache-Control', 'no-store');
-            res.send(buffer);
-            return;
-        }
-
-        const sniffChunks = [];
-        let done = false;
-        while (!done && Buffer.concat(sniffChunks).length < 400) {
-            const { done: isDone, value } = await reader.read();
-            if (isDone) {
-                done = true;
-                break;
-            }
-            sniffChunks.push(Buffer.from(value));
-        }
-        const sniffBuffer = Buffer.concat(sniffChunks);
-        const finalType = detectNetflixMirrorPayloadType(sniffBuffer, contentType || 'application/octet-stream');
-
-        res.status(upstream.status);
-        res.set('Content-Type', finalType || 'application/octet-stream');
-        if (contentLength) res.set('Content-Length', contentLength);
-        if (contentRange) res.set('Content-Range', contentRange);
-        if (acceptRanges) res.set('Accept-Ranges', acceptRanges);
-        res.set('Cache-Control', 'no-store');
-
-        if (sniffBuffer.length > 0) {
-            res.write(sniffBuffer);
-        }
-
-        if (done) {
-            res.end();
-            return;
-        }
-
-        const pump = async () => {
-            while (true) {
-                const { done: isDone, value } = await reader.read();
-                if (isDone) break;
-                res.write(Buffer.from(value));
-            }
-            res.end();
-        };
-
-        pump().catch(err => {
-            console.error(`[HTTP-RESOLVER] NetflixMirror stream pump failed: ${err.message}`);
-            if (!res.headersSent) {
-                res.status(502).send('Failed to proxy NetflixMirror stream');
-            } else {
-                res.destroy(err);
-            }
-        });
-    } catch (error) {
-        console.error(`[HTTP-RESOLVER] NetflixMirror proxy failed: ${error.message}`);
-        res.status(502).send('Failed to proxy NetflixMirror stream');
-    }
-}
 
 // Middleware to check admin token
 function checkAdminAuth(req, res, next) {
