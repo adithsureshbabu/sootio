@@ -85,60 +85,6 @@ SOOTIO_CONTAINER=my-sootio ./scripts/import-sqlite.sh
 0 2 * * * cd /path/to/sootio && ./scripts/export-sqlite.sh /backups/sootio-db
 ```
 
-## Donation Data Export/Import
-
-The donation tracker stores data in `donations.json` inside `/app/data` for the Dockerized addon. Use these scripts to back it up or restore it safely.
-
-### Export Donation Data
-
-```bash
-./scripts/export-donations.sh [output-directory]
-```
-
-**Examples:**
-```bash
-# Export to default location (./donations-backup)
-./scripts/export-donations.sh
-
-# Export to custom location
-./scripts/export-donations.sh /path/to/donation-backup
-
-# Export from a different container
-SOOTIO_CONTAINER=my-sootio ./scripts/export-donations.sh
-```
-
-The export script:
-- Copies `/app/data/donations.json` out of the running container
-- Verifies that the exported file is valid JSON
-- Creates a timestamped backup plus a `donations.json.latest` symlink
-
-### Import Donation Data
-
-```bash
-./scripts/import-donations.sh [source-directory-or-file]
-```
-
-**Examples:**
-```bash
-# Import the latest backup from the default directory
-./scripts/import-donations.sh
-
-# Import from a specific backup directory
-./scripts/import-donations.sh /path/to/donation-backup
-
-# Import a specific file directly
-./scripts/import-donations.sh ./donations-backup/donations.json.20260311_083000
-
-# Import into a different container
-SOOTIO_CONTAINER=my-sootio ./scripts/import-donations.sh
-```
-
-The import script:
-- Validates the source JSON before copying it
-- Copies it into the container as a temp file and validates it again
-- Backs up the current `donations.json` with a timestamp before replacing it
-- Replaces the target file atomically with `mv`
-
 ### Clear Cache Entries
 
 Use `clear-sqlite-cache.sh` to wipe cached rows directly from the containerized SQLite database without stopping the addon.
@@ -163,7 +109,6 @@ Use `--list` to display all built-in flags, and `-y/--yes` to skip the confirmat
 ## Environment Variables
 
 - `SOOTIO_CONTAINER` - Docker container name (default: `sootio`)
-- `DONATIONS_FILE_PATH` - Override donation data path inside the container (default: `/app/data/donations.json`)
 
 ### Recover Corrupted Databases
 
