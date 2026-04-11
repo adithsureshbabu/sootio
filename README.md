@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%20100%20100'%3E%3Cdefs%3E%3ClinearGradient%20id='grad'%20x1='0%25'%20y1='0%25'%20x2='100%25'%20y2='100%25'%3E%3Cstop%20offset='0%25'%20style='stop-color:%2364ffda;stop-opacity:1'%20/%3E%3Cstop%20offset='100%25'%20style='stop-color:%2300A7B5;stop-opacity:1'%20/%3E%3C/linearGradient%3E%3C/defs%3E%3Cpath%20fill='url(%23grad)'%20d='M50,5%20C74.85,5%2095,25.15%2095,50%20C95,74.85%2074.85,95%2050,95%20C35,95%2022.33,87.6%2015,76%20C25,85%2040,85%2050,80%20C60,75%2065,65%2065,50%20C65,35%2055,25%2040,25%20C25,25%2015,40%2015,50%20C15,55%2016,60%2018,64%20C8.5,58%205,45%205,50%20C5,25.15%2025.15,5%2050,5%20Z'/%3E%3C/svg%3E" alt="Sootio Logo" width="150">
+  <img src="assets/logo.png" alt="Sootio Logo" width="150">
 </p>
 
 <h1 align="center">Sootio - The Ultimate Stremio Debrid Addon</h1>
