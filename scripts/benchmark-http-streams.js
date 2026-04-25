@@ -18,13 +18,9 @@ import { fileURLToPath } from 'url';
 import { get4KHDHubStreams } from '../lib/http-streams/providers/4khdhub/streams.js';
 import { getHDHub4uStreams } from '../lib/http-streams/providers/hdhub4u/streams.js';
 import { getMKVCinemasStreams } from '../lib/http-streams/providers/mkvcinemas/streams.js';
-import { getMkvDramaStreams } from '../lib/http-streams/providers/mkvdrama/streams.js';
 import { getCineDozeStreams } from '../lib/http-streams/providers/cinedoze/streams.js';
 import { getMalluMvStreams } from '../lib/http-streams/providers/mallumv/streams.js';
-import { getXDMoviesStreams } from '../lib/http-streams/providers/xdmovies/streams.js';
 import { getVixSrcStreams } from '../lib/http-streams/providers/vixsrc/streams.js';
-import { getNetflixMirrorStreams } from '../lib/http-streams/providers/netflixmirror/streams.js';
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BASELINE_PATH = path.join(__dirname, '.benchmark-baseline.json');
 
@@ -51,12 +47,9 @@ const PROVIDERS = [
   { name: '4KHDHub',        fn: get4KHDHubStreams,        tests: ['movie'] },
   { name: 'HDHub4u',        fn: getHDHub4uStreams,        tests: ['movie'] },
   { name: 'MKVCinemas',     fn: getMKVCinemasStreams,      tests: ['movie'] },
-  { name: 'MKVDrama',       fn: getMkvDramaStreams,        tests: ['series'] },
   { name: 'CineDoze',       fn: getCineDozeStreams,        tests: ['movie'] },
   { name: 'MalluMv',        fn: getMalluMvStreams,         tests: ['movie'] },
-  { name: 'XDMovies',       fn: getXDMoviesStreams,        tests: ['movie'] },
   { name: 'VixSrc',         fn: getVixSrcStreams,          tests: ['movie', 'series'] },
-  { name: 'NetflixMirror',  fn: getNetflixMirrorStreams,   tests: ['movie'] },
 ];
 
 async function benchmarkProvider(provider, content) {
