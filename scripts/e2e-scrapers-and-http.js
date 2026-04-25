@@ -18,7 +18,6 @@ import { searchIlCorsaroNero } from '../lib/scrapers/public-trackers/ilcorsarone
 import { searchTorrent9 } from '../lib/scrapers/public-trackers/torrent9.js';
 
 // HTTP streaming
-import { getMkvDramaStreams } from '../lib/http-streams/providers/mkvdrama/streams.js';
 
 const TIMEOUT = 30000;
 const LOG_PREFIX = 'E2E';
@@ -99,22 +98,8 @@ for (const [name, fn] of tvTests) {
     if (await runTest(name, fn)) scraperPass++;
 }
 
-// ============================================================
-// Part 3: HTTP Streaming - MKVDrama
-// ============================================================
-console.log('\n--- HTTP Streaming: MKVDrama ---');
-
 let httpPass = 0;
 let httpTotal = 0;
-
-// Test MkvDrama with a well-known K-drama (movie type, no episode needed)
-// Use IMDB ID for a popular drama
-httpTotal++;
-const mkvResult = await runTest('MkvDrama (Squid Game)', async () => {
-    // tt10919420 = Squid Game, S01E01
-    return getMkvDramaStreams('tt10919420', 'series', '1', '1', { clientIp: '127.0.0.1' });
-});
-if (mkvResult) httpPass++;
 
 // ============================================================
 // Summary

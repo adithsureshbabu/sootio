@@ -9,6 +9,7 @@ import serverless from './serverless.js';
 import requestIp from 'request-ip';
 import rateLimit from 'express-rate-limit';
 import swStats from 'swagger-stats';
+import cluster from 'cluster';
 import addonInterface from "./addon.js";
 import streamProvider from './lib/stream-provider.js';
 import * as sqliteCache from './lib/util/cache-store.js';
@@ -35,6 +36,7 @@ import { getManifest } from './lib/util/manifest.js';
 import landingTemplate from './lib/util/landingTemplate.js';
 import fetch from 'node-fetch';
 import debridProxyManager from './lib/util/debrid-proxy.js';
+import { spawn } from 'child_process';
 
 const execFileAsync = promisify(execFile);
 
@@ -60,8 +62,8 @@ async function resolveHttpStreamUrlInSubprocess(url) {
                         DEBRID_PER_SERVICE_PROXIES: '',
                         DEBRID_PROXY_SERVICES: '*:false'
                     },
-                    timeout: 45000,
-                    maxBuffer: 1024 * 1024
+                    timeout: parseInt(process.env.SHORTLINK_SUBPROCESS_TIMEOUT_MS || '180000', 10),
+                    maxBuffer: 10 * 1024 * 1024
                 }
             );
 
@@ -74,17 +76,17 @@ async function resolveHttpStreamUrlInSubprocess(url) {
             const parsed = JSON.parse(jsonLine || '{}');
             const resolved = typeof parsed?.resolved === 'string' && parsed.resolved ? parsed.resolved : null;
             if (resolved) {
-                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve succeeded on attempt ${attempt}`);
+                console.log(`[HTTP-RESOLVER] Subprocess shortlink resolve succeeded on attempt ${attempt}`);
                 return resolved;
             }
             const stdoutTail = String(stdout || '').split(/\r?\n/).slice(-10).join('\n');
             const stderrTail = String(stderr || '').split(/\r?\n/).slice(-10).join('\n');
-            console.log(`[HTTP-RESOLVER] Subprocess MKVDrama resolve returned no URL on attempt ${attempt}. Stdout tail:\n${stdoutTail}`);
+            console.log(`[HTTP-RESOLVER] Subprocess shortlink resolve returned no URL on attempt ${attempt}. Stdout tail:\n${stdoutTail}`);
             if (stderrTail) {
-                console.log(`[HTTP-RESOLVER] Subprocess MKVDrama stderr tail:\n${stderrTail}`);
+                console.log(`[HTTP-RESOLVER] Subprocess shortlink stderr tail:\n${stderrTail}`);
             }
         } catch (error) {
-            console.error(`[HTTP-RESOLVER] Subprocess MKVDrama resolve failed on attempt ${attempt}: ${error.message}`);
+            console.error(`[HTTP-RESOLVER] Subprocess shortlink resolve failed on attempt ${attempt}: ${error.message}`);
         }
 
         if (attempt < 2) {
@@ -479,6 +481,65 @@ app.get('/', (req, res) => {
 app.get('/configure', async (req, res) => {
     const manifest = getManifest({}, true);
     res.send(await landingTemplate(manifest, {}));
+});
+
+// HTTP Streams Health Status — cached in memory so last results survive restarts
+// (files in data/ persist on disk; memory cache is a fast-path fallback)
+const healthStatusDir = path.join(path.dirname(fileURLToPath(import.meta.url)), 'data');
+const healthStatusCache = { md: null, json: null };
+
+function readHealthFile(filename) {
+    const filePath = path.join(healthStatusDir, filename);
+    try {
+        if (fs.existsSync(filePath)) {
+            const content = fs.readFileSync(filePath, 'utf8');
+            // Update in-memory cache whenever we successfully read from disk
+            const key = filename.endsWith('.json') ? 'json' : 'md';
+            healthStatusCache[key] = content;
+            return content;
+        }
+    } catch { /* fall through to cache */ }
+    // Return cached version if disk read fails
+    const key = filename.endsWith('.json') ? 'json' : 'md';
+    return healthStatusCache[key];
+}
+
+// Pre-load cache from disk on startup (survives reboot as long as data/ persists)
+try {
+    readHealthFile('http-streams-status.md');
+    readHealthFile('http-streams-status.json');
+} catch { /* ignore — first run */ }
+
+// HTTP Streams Health Check Dashboard
+app.get('/health', (req, res) => {
+    try {
+        const dashboardPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'scripts', 'health-dashboard.html');
+        const html = fs.readFileSync(dashboardPath, 'utf8');
+        res.setHeader('Content-Type', 'text/html; charset=utf-8');
+        res.send(html);
+    } catch (err) {
+        res.status(500).json({ error: 'Dashboard not found', message: err.message });
+    }
+});
+
+// HTTP Streams Status (Markdown)
+app.get('/http-streams-status', (req, res) => {
+    const content = readHealthFile('http-streams-status.md');
+    if (!content) {
+        return res.status(404).json({ error: 'Health check has not run yet' });
+    }
+    res.setHeader('Content-Type', 'text/markdown; charset=utf-8');
+    res.send(content);
+});
+
+// HTTP Streams Status (JSON)
+app.get('/http-streams-status.json', (req, res) => {
+    const content = readHealthFile('http-streams-status.json');
+    if (!content) {
+        return res.status(404).json({ error: 'Health check has not run yet' });
+    }
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.send(content);
 });
 
 app.get('/manifest-no-catalogs.json', (req, res) => {
@@ -888,9 +949,7 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
         decodedUrl.includes('tech.unblockedgames.world') ||
         decodedUrl.includes('tech.creativeexpressionsblog.com') ||
         decodedUrl.includes('tech.examzculture.in');
-    const isMkvDramaResolveUrl = decodedUrl.includes('mkvdrama.net') ||
-        decodedUrl.includes('mkv_token=') ||
-        decodedUrl.includes('ouo.io') ||
+    const isShortlinkResolveUrl = decodedUrl.includes('ouo.io') ||
         decodedUrl.includes('ouo.press') ||
         decodedUrl.includes('oii.la') ||
         decodedUrl.includes('viewcrate.cc') ||
@@ -940,12 +999,12 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
                 // UHDMovies SID/driveleech URL
                 console.log(`[HTTP-RESOLVER] Detected UHDMovies URL, using UHDMovies resolver`);
                 resolvePromise = resolveUHDMoviesUrl(decodedUrl);
-            } else if (isMkvDramaResolveUrl && (
+            } else if (isShortlinkResolveUrl && (
                 decodedUrl.includes('ouo.io') ||
                 decodedUrl.includes('ouo.press') ||
                 decodedUrl.includes('oii.la')
             )) {
-                console.log(`[HTTP-RESOLVER] Detected MKVDrama shortlink, using subprocess resolver`);
+                console.log(`[HTTP-RESOLVER] Detected OUO shortlink, using subprocess resolver`);
                 resolvePromise = resolveHttpStreamUrlInSubprocess(decodedUrl);
             } else {
                 // 4KHDHub/other HTTP streaming URLs
@@ -956,12 +1015,12 @@ app.get('/resolve/httpstreaming/:url', resolveRateLimiter, async (req, res) => {
             // Set timeout for HTTP stream resolution
             const baseTimeoutMs = parseInt(process.env.HTTP_RESOLVE_TIMEOUT || '15000', 10);
             const uhdTimeoutMs = parseInt(process.env.UHDMOVIES_RESOLVE_TIMEOUT || '25000', 10);
-            const mkvDramaTimeoutMs = parseInt(process.env.MKVDRAMA_HTTP_RESOLVE_TIMEOUT || '60000', 10);
+            const shortlinkTimeoutMs = parseInt(process.env.SHORTLINK_HTTP_RESOLVE_TIMEOUT || '210000', 10);
             const providerArchiveTimeoutMs = parseInt(process.env.PROVIDER_ARCHIVE_HTTP_RESOLVE_TIMEOUT || '30000', 10);
             const timeoutMs = isUHDMoviesUrl
                 ? Math.max(baseTimeoutMs, uhdTimeoutMs)
-                : ((isMkvDramaResolveUrl || isProviderArchiveResolveUrl)
-                    ? Math.max(baseTimeoutMs, isProviderArchiveResolveUrl ? providerArchiveTimeoutMs : mkvDramaTimeoutMs)
+                : ((isShortlinkResolveUrl || isProviderArchiveResolveUrl)
+                    ? Math.max(baseTimeoutMs, isProviderArchiveResolveUrl ? providerArchiveTimeoutMs : shortlinkTimeoutMs)
                     : baseTimeoutMs);
             const timedResolve = Promise.race([
                 resolvePromise,
@@ -3467,6 +3526,46 @@ const PORT = process.env.PORT || 7000;  // Consistent port definition
 
 let server = null;
 
+/**
+ * Run HTTP streams health check in background on startup
+ * Generates status report to /http-streams-status and /http-streams-status.json
+ */
+function runHealthCheckOnStartup() {
+    // Run in background using spawn to avoid blocking
+    const __filename = fileURLToPath(import.meta.url);
+    const healthCheckScript = path.join(path.dirname(__filename), 'scripts', 'test-http-streams-status.mjs');
+
+    const child = spawn('node', [healthCheckScript], {
+        detached: true,
+        stdio: ['ignore', 'pipe', 'pipe']
+    });
+
+    // Log health check progress
+    let output = '';
+    child.stdout?.on('data', (data) => {
+        const lines = data.toString().split('\n').filter(l => l.includes('[HTTP-HEALTH]'));
+        if (lines.length > 0) {
+            console.log('[STARTUP] Health check:', lines[0]);
+            output += data;
+        }
+    });
+
+    child.stderr?.on('data', (data) => {
+        const str = data.toString();
+        if (str.includes('[HTTP-HEALTH]')) {
+            console.log('[STARTUP] Health check:', str.trim());
+        }
+    });
+
+    // Don't wait for it, let it run in background
+    child.unref();
+
+    console.log('[STARTUP] HTTP streams health check started in background');
+}
+
+const HTTP_STREAMS_STARTUP_HEALTHCHECK_ENABLED = process.env.HTTP_STREAMS_STARTUP_HEALTHCHECK_ENABLED !== 'false';
+const shouldRunStartupHealthCheck = HTTP_STREAMS_STARTUP_HEALTHCHECK_ENABLED && (!cluster.isWorker || cluster.worker?.id === 1);
+
 // Check if we're running directly (not being imported by cluster)
 // For standalone mode, start the server directly
 if (import.meta.url === `file://${__filename}`) {
@@ -3489,9 +3588,15 @@ if (import.meta.url === `file://${__filename}`) {
         }
     });
     memoryMonitor.startMonitoring();
-    
+
     server = app.listen(PORT, HOST, () => {
         console.log('HTTP server listening on port: ' + server.address().port);
+        if (shouldRunStartupHealthCheck) {
+            // Run HTTP streams health check in background on startup
+            runHealthCheckOnStartup();
+        } else {
+            console.log('[STARTUP] HTTP streams health check skipped');
+        }
     });
     applyHttpServerTuning(server);
     

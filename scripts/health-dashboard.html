@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HTTP Streams Health Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+        }
+
+        .header h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .last-updated {
+            color: #666;
+            font-size: 0.95em;
+        }
+
+        .summary {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+
+        .summary-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-left: 4px solid #667eea;
+        }
+
+        .summary-card.success {
+            border-left-color: #10b981;
+        }
+
+        .summary-card.warning {
+            border-left-color: #f59e0b;
+        }
+
+        .summary-card.error {
+            border-left-color: #ef4444;
+        }
+
+        .summary-card h3 {
+            color: #666;
+            font-size: 0.85em;
+            text-transform: uppercase;
+            margin-bottom: 10px;
+        }
+
+        .summary-card .value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #333;
+        }
+
+        .summary-card .label {
+            color: #999;
+            font-size: 0.9em;
+            margin-top: 5px;
+        }
+
+        .providers {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(350px, 1fr));
+            gap: 20px;
+        }
+
+        .provider-card {
+            background: white;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            border-top: 4px solid #ddd;
+        }
+
+        .provider-card.working {
+            border-top-color: #10b981;
+        }
+
+        .provider-card.no-content {
+            border-top-color: #f59e0b;
+        }
+
+        .provider-card.failed {
+            border-top-color: #ef4444;
+        }
+
+        .provider-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 12px;
+        }
+
+        .provider-name {
+            font-weight: 600;
+            font-size: 1.1em;
+            color: #333;
+        }
+
+        .provider-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 0.75em;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .badge.working {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .badge.no-content {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .badge.failed {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .provider-info {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .provider-error {
+            margin-top: 8px;
+            padding: 8px;
+            background: #fee2e2;
+            border-radius: 6px;
+            color: #991b1b;
+            font-size: 0.85em;
+            font-family: 'Courier New', monospace;
+        }
+
+        .refresh-btn {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.95em;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        .refresh-btn:hover {
+            background: #5568d3;
+        }
+
+        .refresh-btn:active {
+            transform: scale(0.98);
+        }
+
+        .footer {
+            text-align: center;
+            color: white;
+            margin-top: 40px;
+            font-size: 0.9em;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            background: white;
+            border-radius: 12px;
+            color: #666;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        @media (max-width: 768px) {
+            .providers {
+                grid-template-columns: 1fr;
+            }
+
+            .header h1 {
+                font-size: 1.5em;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 HTTP Streams Health Dashboard</h1>
+            <p class="last-updated">Last Updated: <span id="updated">Loading...</span></p>
+            <button class="refresh-btn" onclick="refreshStatus()">🔄 Refresh Now</button>
+        </div>
+
+        <div id="content">
+            <div class="loading">
+                <div class="spinner"></div>
+                <p>Loading status...</p>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Auto-updated every 12 hours (6am and 6pm UTC)</p>
+        </div>
+    </div>
+
+    <script>
+        async function loadStatus() {
+            try {
+                // Try to load JSON status
+                const response = await fetch('/http-streams-status.json');
+                if (!response.ok) {
+                    throw new Error('Status file not found');
+                }
+
+                const data = await response.json();
+                renderDashboard(data);
+            } catch (err) {
+                document.getElementById('content').innerHTML = `
+                    <div class="loading">
+                        <p>⚠️ Health check hasn't run yet</p>
+                        <p style="margin-top: 10px; color: #999;">Status will appear here after the first check</p>
+                    </div>
+                `;
+            }
+        }
+
+        function renderDashboard(data) {
+            const { summary, results, timestamp } = data;
+            const date = new Date(timestamp);
+            const formatted = date.toLocaleString();
+
+            document.getElementById('updated').textContent = formatted;
+
+            const successRate = parseInt(summary.successRate);
+            const working = summary.working;
+            const noContent = summary.noContent;
+            const failed = summary.failed;
+
+            let html = `
+                <div class="summary">
+                    <div class="summary-card success">
+                        <h3>✅ Working (206)</h3>
+                        <div class="value">${working}</div>
+                        <div class="label">of ${summary.total} providers</div>
+                    </div>
+                    <div class="summary-card warning">
+                        <h3>⚠️ No Content</h3>
+                        <div class="value">${noContent}</div>
+                        <div class="label">providers</div>
+                    </div>
+                    <div class="summary-card error">
+                        <h3>❌ Failed</h3>
+                        <div class="value">${failed}</div>
+                        <div class="label">providers</div>
+                    </div>
+                    <div class="summary-card">
+                        <h3>📊 Success Rate</h3>
+                        <div class="value">${successRate}%</div>
+                        <div class="label">overall</div>
+                    </div>
+                </div>
+
+                <div class="providers">
+            `;
+
+            // Sort providers by status
+            const sorted = [...results].sort((a, b) => {
+                const order = { 'working': 0, 'no-content': 1, 'failed': 2 };
+                return (order[a.status] || 3) - (order[b.status] || 3);
+            });
+
+            sorted.forEach(provider => {
+                const { name, status, streams, error, testContent, elapsedMs } = provider;
+                const statusBadge = status === 'working' ? '✅ Working' :
+                                   status === 'no-content' ? '⚠️ No Content' :
+                                   '❌ Failed';
+                const time = elapsedMs < 1000 ? `${elapsedMs}ms` : `${(elapsedMs / 1000).toFixed(1)}s`;
+
+                html += `
+                    <div class="provider-card ${status}">
+                        <div class="provider-header">
+                            <span class="provider-name">${name}</span>
+                            <span class="provider-badge badge ${status}">${statusBadge}</span>
+                        </div>
+                        <div class="provider-info">
+                            ${status === 'working' ? `Streams found: <strong>${streams}</strong> &middot; ${time}` :
+                              status === 'no-content' ? `No streams returned &middot; ${time}` :
+                              `${(error || '').includes('No HTTP 206') ? 'No 206-verified stream' : 'Provider error'} &middot; ${time}`}
+                        </div>
+                        ${testContent ? `<div class="provider-info" style="margin-top:4px;color:#999;font-size:0.8em">Test: ${escapeHtml(testContent)}</div>` : ''}
+                        ${error ? `<div class="provider-error">${escapeHtml(error)}</div>` : ''}
+                    </div>
+                `;
+            });
+
+            html += `</div>`;
+            document.getElementById('content').innerHTML = html;
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        async function refreshStatus() {
+            const btn = event.target;
+            btn.disabled = true;
+            btn.textContent = '🔄 Refreshing...';
+
+            try {
+                // Force fetch from server
+                const response = await fetch('/http-streams-status.json?t=' + Date.now());
+                if (response.ok) {
+                    const data = await response.json();
+                    renderDashboard(data);
+                }
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔄 Refresh Now';
+            }
+        }
+
+        // Load on page load
+        loadStatus();
+
+        // Refresh every minute
+        setInterval(loadStatus, 60000);
+    </script>
+</body>
+</html>

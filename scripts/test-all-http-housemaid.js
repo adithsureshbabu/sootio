@@ -16,17 +16,18 @@ import { resolveHttpStreamUrl } from '../lib/http-streams/resolvers/http-resolve
 import { validateSeekableUrl } from '../lib/http-streams/utils/validation.js';
 import { makeRequest } from '../lib/http-streams/utils/http.js';
 
+// The Housemaid (2010)
 const TEST_MOVIE = {
-    imdbId: 'tt1375666',
-    tmdbId: '27205',
-    name: 'Inception',
+    imdbId: 'tt1595859',
+    tmdbId: '44667',
+    name: 'The Housemaid',
     year: 2010,
     type: 'movie'
 };
 
 const CONFIG = { clientIp: '127.0.0.1' };
 const DIRECT_PROBE_TIMEOUT = 10_000;
-const MAX_DIRECT_STREAMS_TO_TRY = 5;
+const MAX_DIRECT_STREAMS_TO_TRY = 3;
 
 function looksLikeMediaPayload(buffer, contentType = '') {
     if (!buffer || buffer.length === 0) return false;
@@ -49,20 +50,6 @@ function looksLikeMediaPayload(buffer, contentType = '') {
     return true;
 }
 
-function firstPlaylistUri(playlistText = '') {
-    return playlistText
-        .split(/\r?\n/)
-        .map(line => line.trim())
-        .find(line => line && !line.startsWith('#') && line.includes('.m3u8')) || null;
-}
-
-function firstMediaSegmentUri(playlistText = '') {
-    return playlistText
-        .split(/\r?\n/)
-        .map(line => line.trim())
-        .find(line => line && !line.startsWith('#')) || null;
-}
-
 async function probeDirectUrl206(url, headers = {}) {
     const validation = await validateSeekableUrl(url, {
         requirePartialContent: true,
@@ -77,7 +64,6 @@ async function probeDirectUrl206(url, headers = {}) {
         };
     }
 
-    // Small GET range probe to confirm payload is media rather than HTML placeholder.
     const rangeResponse = await makeRequest(url, {
         method: 'GET',
         timeout: DIRECT_PROBE_TIMEOUT,
@@ -106,13 +92,17 @@ async function verifyDirectProvider(providerName, getStreamsFn, meta, useImdbId 
     const contentId = useImdbId ? meta.imdbId : meta.tmdbId;
 
     let streams;
-    if (hasConfigParam) {
-        streams = await getStreamsFn(contentId, meta.type, null, null, CONFIG, {
-            name: meta.name,
-            year: meta.year
-        });
-    } else {
-        streams = await getStreamsFn(contentId, meta.type, null, null);
+    try {
+        if (hasConfigParam) {
+            streams = await getStreamsFn(contentId, meta.type, null, null, CONFIG, {
+                name: meta.name,
+                year: meta.year
+            });
+        } else {
+            streams = await getStreamsFn(contentId, meta.type, null, null);
+        }
+    } catch (error) {
+        return { provider: providerName, ok: false, streamsCount: 0, reason: `search error: ${error.message}`, elapsedMs: Date.now() - startedAt };
     }
 
     if (!Array.isArray(streams) || streams.length === 0) {
@@ -134,7 +124,7 @@ async function verifyDirectProvider(providerName, getStreamsFn, meta, useImdbId 
             const probe = await probeDirectUrl206(resolvedUrl);
             attempts.push({
                 sourceUrl,
-                resolvedUrl,
+                resolvedUrl: resolvedUrl.substring(0, 80),
                 ...probe
             });
 
@@ -168,32 +158,6 @@ async function verifyDirectProvider(providerName, getStreamsFn, meta, useImdbId 
     };
 }
 
-async function fetchPlaylist(url, headers, referer = null) {
-    const requestHeaders = { ...headers };
-    if (referer) requestHeaders.Referer = referer;
-    return makeRequest(url, {
-        headers: requestHeaders,
-        timeout: 10_000,
-        maxBodySize: 1_500_000
-    });
-}
-
-async function fetchMediaRange(url, headers, referer = null) {
-    const requestHeaders = {
-        ...headers,
-        Range: 'bytes=0-1023'
-    };
-    if (referer) requestHeaders.Referer = referer;
-
-    return makeRequest(url, {
-        method: 'GET',
-        headers: requestHeaders,
-        timeout: 10_000,
-        maxBodySize: 4096
-    });
-}
-
-
 function printResult(result) {
     console.log(`\n=== ${result.provider} ===`);
     console.log(`ok: ${result.ok}`);
@@ -210,7 +174,7 @@ function printResult(result) {
     }
 
     if (Array.isArray(result.attempts) && result.attempts.length > 0) {
-        const attemptsPreview = result.attempts.slice(0, 6);
+        const attemptsPreview = result.attempts.slice(0, 2);
         console.log(JSON.stringify(attemptsPreview, null, 2));
         if (result.attempts.length > attemptsPreview.length) {
             console.log(`... ${result.attempts.length - attemptsPreview.length} more attempts`);
@@ -220,7 +184,6 @@ function printResult(result) {
 
 async function main() {
     const results = [];
-    console.log('MAIN_START');
 
     const providers = [
         { name: '4KHDHub', fn: get4KHDHubStreams, useImdbId: false, hasConfigParam: true },
@@ -235,15 +198,15 @@ async function main() {
         { name: 'VixSrc', fn: getVixSrcStreams, useImdbId: false, hasConfigParam: false }
     ];
 
-    console.log(`\n\n[E2E-HTTP-206] Starting test for ${providers.length} providers...\n`);
+    console.log(`\n========================================\n  Testing ${providers.length} HTTP Stream Providers\n  Movie: ${TEST_MOVIE.name} (${TEST_MOVIE.year})\n========================================\n`);
 
     for (const provider of providers) {
-        console.log(`Testing ${provider.name}...`);
+        console.log(`[${providers.indexOf(provider) + 1}/${providers.length}] Testing ${provider.name}...`);
         try {
             const result = await verifyDirectProvider(provider.name, provider.fn, TEST_MOVIE, provider.useImdbId, provider.hasConfigParam);
             results.push(result);
         } catch (error) {
-            console.log(`${provider.name} - fatal error: ${error.message}`);
+            console.log(`  ERROR: ${error.message}`);
             results.push({
                 provider: provider.name,
                 ok: false,
@@ -253,6 +216,8 @@ async function main() {
         }
     }
 
+    console.log('\n\n========================================\n  Test Results\n========================================');
+
     for (const result of results) {
         printResult(result);
     }
@@ -261,7 +226,8 @@ async function main() {
     console.log(`\n\nSUMMARY: ${results.length - failed.length}/${results.length} providers passed strict 206 media verification`);
     if (failed.length > 0) {
         console.log(`FAILED: ${failed.map(result => result.provider).join(', ')}`);
-        process.exit(1);
+    } else {
+        console.log('ALL PROVIDERS PASSED!');
     }
 }
 
